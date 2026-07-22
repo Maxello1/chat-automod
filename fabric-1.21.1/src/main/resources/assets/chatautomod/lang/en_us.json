@@ -1,0 +1,11 @@
+{
+  "chatautomod.command.header": "Chat AutoMod",
+  "chatautomod.command.status.ready": "The Minecraft 1.21.1 adapter is active.",
+  "chatautomod.command.unavailable": "This command is not available in the Minecraft 1.21.1 adapter yet.",
+  "chatautomod.command.test.result": "Decision: %s; points: +%s; rules: %s",
+  "chatautomod.permission.denied": "You do not have permission to use this command.",
+  "chatautomod.mute.active": "You are muted for another %s seconds. Reason: %s",
+  "chatautomod.mute.applied": "You have been muted until %s. Reason: %s",
+  "chatautomod.staff.alert": "[AutoMod] %s triggered %s. +%s points, score %s",
+  "chatautomod.warning": "Please follow the server chat rules."
+}

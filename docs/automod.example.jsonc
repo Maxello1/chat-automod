@@ -1,0 +1,172 @@
+{
+  // Runtime files use strict JSON. Remove comments before using this example directly.
+  "schema_version": 1,
+  "enabled": true,
+
+  "permissions": {
+    // Used when no compatible permission provider supplies a value.
+    "fallback_operator_level": 3
+  },
+
+  "normalization": {
+    "unicode_nfkc": true,
+    "remove_zero_width_characters": true,
+    "normalize_link_obfuscation": true,
+    "lookalike_substitutions": {
+      "а": "a",
+      "е": "e",
+      "о": "o",
+      "р": "p",
+      "с": "c",
+      "х": "x"
+    },
+    "leet_substitutions": {
+      "0": "o",
+      "3": "e",
+      "4": "a",
+      "5": "s",
+      "7": "t",
+      "@": "a",
+      "$": "s"
+    }
+  },
+
+  "rules": {
+    "rapid_spam": {
+      "enabled": true,
+      "points": 1,
+      "actions": ["BLOCK", "NOTIFY_STAFF"],
+      "minimum_interval_ms": 700,
+      "window_seconds": 8,
+      "maximum_messages_in_window": 5
+    },
+    "duplicate_spam": {
+      "enabled": true,
+      "points": 2,
+      "actions": ["BLOCK", "NOTIFY_STAFF"],
+      "history_size": 8,
+      "duplicate_window_seconds": 45,
+      "minimum_length": 3
+    },
+    "similarity_spam": {
+      "enabled": true,
+      "points": 2,
+      "actions": ["BLOCK", "NOTIFY_STAFF"],
+      "history_size": 8,
+      "window_seconds": 45,
+      "minimum_length": 8,
+      "maximum_processed_length": 512,
+      "similarity_threshold": 0.86
+    },
+    "caps": {
+      "enabled": true,
+      "points": 1,
+      "actions": ["BLOCK"],
+      "minimum_letters": 8,
+      "maximum_uppercase_ratio": 0.75
+    },
+    "repeated_characters": {
+      "enabled": true,
+      "points": 1,
+      "actions": ["BLOCK"],
+      "maximum_repeated_letters": 6,
+      "maximum_repeated_symbols": 8
+    },
+    "message_length": {
+      "enabled": true,
+      "points": 1,
+      "actions": ["BLOCK"],
+      "maximum_length": 220
+    },
+    "advertising": {
+      "enabled": true,
+      "points": 5,
+      "actions": ["BLOCK", "NOTIFY_STAFF"],
+      "allowed_domains": ["example.org", "modrinth.com"]
+    }
+  },
+
+  "filters": [
+    {
+      "id": "example_language_rule",
+      "enabled": true,
+      "match_mode": "WORD",
+      "terms": ["example-term"],
+      "exceptions": ["allowed example phrase"],
+      "points": 3,
+      "actions": ["BLOCK", "NOTIFY_STAFF"]
+    }
+  ],
+
+  "score": {
+    "point_decay_minutes": 30,
+    "maximum_points_per_message": 10,
+    "threshold_mode": "HIGHEST_CROSSED",
+    "thresholds": [
+      {
+        "points": 2,
+        "actions": [
+          {
+            "type": "WARN",
+            "message": "Please follow the server chat rules."
+          }
+        ]
+      },
+      {
+        "points": 5,
+        "actions": [
+          {
+            "type": "MUTE",
+            "duration": "5m",
+            "reason": "Repeated chat violations."
+          }
+        ]
+      },
+      {
+        "points": 10,
+        "actions": [
+          {
+            "type": "KICK",
+            "reason": "Repeated chat violations."
+          }
+        ]
+      },
+      {
+        "points": 20,
+        "actions": [
+          {
+            "type": "EXECUTE_COMMAND",
+            "command": "tempban {player} 1d AutoMod violations"
+          }
+        ]
+      }
+    ]
+  },
+
+  "staff_alerts": {
+    "show_original": false,
+    "mute_button_duration": "5m"
+  },
+
+  "logging": {
+    "enabled": true,
+    "store_original_messages": false,
+    "retention_days": 30
+  },
+
+  "history": {
+    "maximum_entries_per_player": 100,
+    "retention_days": 30
+  },
+
+  "state": {
+    "inactive_player_minutes": 30,
+    "maximum_tracked_players": 10000,
+    "maximum_score_entries_per_player": 4096
+  },
+
+  "mutes": {
+    "notification_cooldown": "5s",
+    "maximum_duration": "30d"
+  }
+}

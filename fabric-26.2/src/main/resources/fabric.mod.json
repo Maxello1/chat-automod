@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "chatautomod",
+  "version": "${version}",
+  "name": "Chat AutoMod",
+  "description": "Deterministic, server-side chat moderation for Fabric servers.",
+  "authors": [
+    "Maxello1"
+  ],
+  "contact": {
+    "sources": "https://github.com/Maxello1/chat-automod"
+  },
+  "license": "All-Rights-Reserved",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.maxello1.chatautomod.fabric262.ChatAutoModFabric"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "fabric-api": ">=0.154.2+26.2",
+    "minecraft": "26.2",
+    "java": ">=25"
+  }
+}

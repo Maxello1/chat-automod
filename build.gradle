@@ -1,0 +1,18 @@
+plugins {
+    id 'base'
+}
+
+allprojects {
+    group = project.maven_group
+    version = project.mod_version
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+tasks.register('releaseBuild') {
+    group = 'build'
+    description = 'Builds and verifies every Chat AutoMod module.'
+    dependsOn ':core:test', ':fabric-26.2:build', ':fabric-1.21.1:build'
+}

@@ -1,0 +1,13 @@
+{
+  "chatautomod.command.no_player": "This command can only be used by a player.",
+  "chatautomod.command.no_permission": "You do not have permission to use this command.",
+  "chatautomod.command.reload.success": "Chat AutoMod configuration reloaded.",
+  "chatautomod.command.test.header": "Chat AutoMod test result",
+  "chatautomod.command.clear.success": "Cleared moderation data for %s.",
+  "chatautomod.command.mute.success": "Muted %s until %s.",
+  "chatautomod.command.unmute.success": "Unmuted %s.",
+  "chatautomod.command.inspect.enabled": "Detailed Chat AutoMod alerts enabled.",
+  "chatautomod.command.inspect.disabled": "Detailed Chat AutoMod alerts disabled.",
+  "chatautomod.mute.active": "You are muted for another %s. Reason: %s",
+  "chatautomod.alert.prefix": "[AutoMod]"
+}

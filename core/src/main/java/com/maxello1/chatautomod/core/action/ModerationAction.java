@@ -1,6 +1,7 @@
 package com.maxello1.chatautomod.core.action;
 
 import com.maxello1.chatautomod.core.api.MessageDecision;
+import com.maxello1.chatautomod.core.model.MuteKind;
 
 import java.time.Instant;
 import java.util.List;
@@ -36,7 +37,26 @@ public sealed interface ModerationAction {
         @Override public ActionType type() { return ActionType.WARN; }
     }
 
-    record Mute(UUID playerId, Instant until, String reason, String source) implements ModerationAction {
+    record Mute(UUID playerId, MuteKind kind, Instant mutedAt, Instant until,
+            String reason, String source, String ruleId) implements ModerationAction {
+        public Mute {
+            Objects.requireNonNull(playerId, "playerId");
+            Objects.requireNonNull(kind, "kind");
+            Objects.requireNonNull(mutedAt, "mutedAt");
+            if (kind == MuteKind.TEMPORARY) {
+                Objects.requireNonNull(until, "until");
+            } else if (until != null) {
+                throw new IllegalArgumentException("permanent mute must not have an end");
+            }
+            reason = Objects.requireNonNullElse(reason, "Chat rule violation");
+            source = Objects.requireNonNullElse(source, "automatic");
+            ruleId = Objects.requireNonNullElse(ruleId, "");
+        }
+
+        public Mute(UUID playerId, Instant until, String reason, String source) {
+            this(playerId, MuteKind.TEMPORARY, Instant.MIN, until, reason, source, "");
+        }
+
         @Override public ActionType type() { return ActionType.MUTE; }
     }
 

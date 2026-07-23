@@ -4,8 +4,11 @@
   "enabled": true,
 
   "permissions": {
-    // Used when no compatible permission provider supplies a value.
-    "fallback_operator_level": 3
+    // Compatible permission providers are authoritative when they return a value.
+    "command_fallback_operator_level": 3,
+    "staff_fallback_operator_level": 3,
+    "operators_bypass_moderation": false,
+    "bypass_fallback_operator_level": 4
   },
 
   "normalization": {
@@ -28,7 +31,33 @@
       "7": "t",
       "@": "a",
       "$": "s"
+    },
+    // These extra substitutions apply only to filtered-content matching.
+    "filter_leet_substitutions": {
+      "0": "o",
+      "1": "i",
+      "!": "i",
+      "|": "i",
+      "3": "e",
+      "4": "a",
+      "@": "a",
+      "5": "s",
+      "$": "s",
+      "6": "g",
+      "9": "g",
+      "7": "t"
     }
+  },
+
+  "filter_packs": {
+    "enabled": true,
+    "directory": "filters",
+    "active": [
+      "abusive-language",
+      "identity-harassment",
+      "racist-slurs",
+      "antisemitism-extremism"
+    ]
   },
 
   "rules": {
@@ -85,18 +114,6 @@
       "allowed_domains": ["example.org", "modrinth.com"]
     }
   },
-
-  "filters": [
-    {
-      "id": "example_language_rule",
-      "enabled": true,
-      "match_mode": "WORD",
-      "terms": ["example-term"],
-      "exceptions": ["allowed example phrase"],
-      "points": 3,
-      "actions": ["BLOCK", "NOTIFY_STAFF"]
-    }
-  ],
 
   "score": {
     "point_decay_minutes": 30,

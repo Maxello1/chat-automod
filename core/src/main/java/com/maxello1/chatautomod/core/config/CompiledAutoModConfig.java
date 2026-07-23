@@ -2,6 +2,8 @@ package com.maxello1.chatautomod.core.config;
 
 import com.maxello1.chatautomod.core.action.ConfiguredAction;
 import com.maxello1.chatautomod.core.action.RuleEffect;
+import com.maxello1.chatautomod.core.model.RuleCategory;
+import com.maxello1.chatautomod.core.model.Severity;
 
 import java.time.Duration;
 import java.util.List;
@@ -15,6 +17,7 @@ public record CompiledAutoModConfig(
         Normalization normalization,
         Rules rules,
         List<CompiledFilter> filters,
+        FilterPacks filterPacks,
         Score score,
         Logging logging,
         History history,
@@ -25,7 +28,17 @@ public record CompiledAutoModConfig(
         filters = List.copyOf(filters);
     }
 
-    public record Permissions(int fallbackOperatorLevel) {}
+    public record Permissions(
+            int commandFallbackOperatorLevel,
+            int staffFallbackOperatorLevel,
+            boolean operatorsBypassModeration,
+            int bypassFallbackOperatorLevel
+    ) {
+        public int fallbackOperatorLevel() {
+            return commandFallbackOperatorLevel;
+        }
+    }
+
     public record StaffAlerts(boolean showOriginal, Duration muteButtonDuration) {}
 
     public record Normalization(
@@ -33,11 +46,20 @@ public record CompiledAutoModConfig(
             boolean removeZeroWidthCharacters,
             boolean normalizeLinkObfuscation,
             Map<Integer, String> lookalikeSubstitutions,
-            Map<Integer, String> leetSubstitutions
+            Map<Integer, String> leetSubstitutions,
+            Map<Integer, String> filterLeetSubstitutions
     ) {
         public Normalization {
             lookalikeSubstitutions = Map.copyOf(lookalikeSubstitutions);
             leetSubstitutions = Map.copyOf(leetSubstitutions);
+            filterLeetSubstitutions = Map.copyOf(filterLeetSubstitutions);
+        }
+
+        public Normalization(boolean unicodeNfkc, boolean removeZeroWidthCharacters,
+                boolean normalizeLinkObfuscation, Map<Integer, String> lookalikeSubstitutions,
+                Map<Integer, String> leetSubstitutions) {
+            this(unicodeNfkc, removeZeroWidthCharacters, normalizeLinkObfuscation,
+                    lookalikeSubstitutions, leetSubstitutions, leetSubstitutions);
         }
     }
 
@@ -57,11 +79,32 @@ public record CompiledAutoModConfig(
                         Caps caps, RepeatedCharacters repeatedCharacters, MessageLength messageLength,
                         Advertising advertising) {}
 
-    public record CompiledFilter(String id, FilterMatchMode mode, List<String> terms, List<String> exceptions,
-                                 RuleSettings common) {
+    public record CompiledFilter(
+            String id,
+            RuleCategory category,
+            Severity severity,
+            FilterMatchMode mode,
+            List<String> terms,
+            List<String> patterns,
+            List<String> exceptions,
+            RuleSettings common
+    ) {
         public CompiledFilter {
             terms = List.copyOf(terms);
+            patterns = List.copyOf(patterns);
             exceptions = List.copyOf(exceptions);
+        }
+
+        public CompiledFilter(String id, FilterMatchMode mode, List<String> terms,
+                List<String> exceptions, RuleSettings common) {
+            this(id, RuleCategory.FILTERED_CONTENT, Severity.MODERATE, mode,
+                    terms, List.of(), exceptions, common);
+        }
+    }
+
+    public record FilterPacks(boolean enabled, String directory, List<String> active) {
+        public FilterPacks {
+            active = List.copyOf(active);
         }
     }
 

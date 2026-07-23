@@ -9,9 +9,11 @@ import com.maxello1.chatautomod.core.api.MessageContext;
 import com.maxello1.chatautomod.core.api.MessageDecision;
 import com.maxello1.chatautomod.core.config.CompiledAutoModConfig;
 import com.maxello1.chatautomod.core.detector.DetectorRegistry;
+import com.maxello1.chatautomod.core.detector.FilterDetector;
 import com.maxello1.chatautomod.core.detector.MessageDetector;
 import com.maxello1.chatautomod.core.model.MuteState;
 import com.maxello1.chatautomod.core.model.NormalizedMessage;
+import com.maxello1.chatautomod.core.model.PreventedMatch;
 import com.maxello1.chatautomod.core.model.RecentMessage;
 import com.maxello1.chatautomod.core.model.RuleCategory;
 import com.maxello1.chatautomod.core.model.RuleMatch;
@@ -52,8 +54,18 @@ public final class ModerationEngine {
 
         NormalizedMessage normalized = new TextNormalizer(config.normalization()).normalize(context.rawMessage());
         List<RuleMatch> rawMatches = new ArrayList<>();
+        List<PreventedMatch> preventedMatches = new ArrayList<>();
         for (MessageDetector detector : detectors) {
-            if (!bypass.bypasses(detector.category())) {
+            if (detector instanceof FilterDetector filterDetector) {
+                if (!bypass.bypasses(RuleCategory.FILTERED_CONTENT)) {
+                    FilterDetector.DetectionResult result =
+                            filterDetector.detectDetailed(context, config);
+                    result.matches().stream()
+                            .filter(match -> !bypass.bypasses(match.category()))
+                            .forEach(rawMatches::add);
+                    preventedMatches.addAll(result.preventedMatches());
+                }
+            } else if (!bypass.bypasses(detector.category())) {
                 rawMatches.addAll(detector.detect(context, normalized, state, config));
             }
         }
@@ -75,7 +87,8 @@ public final class ModerationEngine {
         ActionPlan plan = actionPlanner.plan(context, matches, score, config.staffAlerts().showOriginal());
         PlayerModerationState nextState = nextState(context, state, normalized, matches, score, plan, config);
         EvaluationReport report = new EvaluationReport(plan.decision(), Optional.of(normalized), matches,
-                score.pointsBefore(), score.pointsAdded(), score.pointsAfter(), score.crossing(), plan.actions());
+                score.pointsBefore(), score.pointsAdded(), score.pointsAfter(),
+                score.crossing(), plan.actions(), preventedMatches);
         return new EvaluationDraft(report, plan, nextState);
     }
 
@@ -90,11 +103,19 @@ public final class ModerationEngine {
             CompiledAutoModConfig config) {
         boolean notify = state.lastMuteNotificationAt().map(last -> !last.plus(config.mutes().notificationCooldown())
                 .isAfter(context.timestamp())).orElse(true);
-        List<ModerationAction> actions = notify ? List.of(new ModerationAction.Warn(context.playerId(),
-                "You are muted for another " + formatRemaining(Duration.between(context.timestamp(), mute.mutedUntil())) + ".")) : List.of();
+        String notice = mute.kind() == com.maxello1.chatautomod.core.model.MuteKind.PERMANENT
+                ? "You are permanently muted. Reason: " + mute.reason()
+                : "You are muted for another "
+                        + formatRemaining(Duration.between(context.timestamp(), mute.mutedUntil()))
+                        + ". Reason: " + mute.reason();
+        List<ModerationAction> actions = notify
+                ? List.of(new ModerationAction.Warn(context.playerId(), notice)) : List.of();
         PlayerModerationState next = notify
-                ? new PlayerModerationState(state.revision() + 1, state.playerId(), context.playerName(), state.recentMessageTimes(),
-                    state.recentMessages(), state.scoreEntries(), state.mute(), state.violations(), Optional.of(context.timestamp()), context.timestamp())
+                ? new PlayerModerationState(state.revision() + 1, state.playerId(),
+                        context.playerName(), state.recentMessageTimes(),
+                        state.recentMessages(), state.scoreEntries(),
+                        state.crossedThresholds(), state.mute(), state.violations(),
+                        Optional.of(context.timestamp()), context.timestamp())
                 : state;
         int points = ScoreMath.sumActive(state.scoreEntries(), context.timestamp());
         EvaluationReport report = new EvaluationReport(MessageDecision.BLOCK, Optional.empty(), List.of(), points, 0,
@@ -120,25 +141,60 @@ public final class ModerationEngine {
         recent.add(new RecentMessage(normalized.canonical(), similarity, context.timestamp()));
         trimFront(recent, Math.max(config.rules().duplicateSpam().historySize(), config.rules().similaritySpam().historySize()));
 
-        Optional<MuteState> mute = state.mute().filter(existing -> existing.activeAt(context.timestamp()));
-        for (ModerationAction action : plan.actions()) if (action instanceof ModerationAction.Mute requested) {
-            Instant until = mute.filter(existing -> existing.mutedUntil().isAfter(requested.until()))
-                    .map(MuteState::mutedUntil).orElse(requested.until());
-            mute = Optional.of(new MuteState(until, requested.reason(), requested.source()));
+        Optional<MuteState> mute = state.mute()
+                .filter(existing -> existing.activeAt(context.timestamp()));
+        for (ModerationAction action : plan.actions()) {
+            if (!(action instanceof ModerationAction.Mute requested)) {
+                continue;
+            }
+            if (requested.kind() == com.maxello1.chatautomod.core.model.MuteKind.PERMANENT) {
+                mute = Optional.of(MuteState.permanent(requested.mutedAt(),
+                        requested.reason(), requested.source(), requested.ruleId(), null));
+            } else if (mute.isEmpty()
+                    || mute.orElseThrow().kind()
+                            != com.maxello1.chatautomod.core.model.MuteKind.PERMANENT
+                    && mute.orElseThrow().mutedUntil().isBefore(requested.until())) {
+                mute = Optional.of(MuteState.temporary(requested.mutedAt(),
+                        requested.until(), requested.reason(), requested.source(),
+                        requested.ruleId(), null));
+            }
         }
 
         List<ViolationRecord> violations = new ArrayList<>();
         Instant historyCutoff = context.timestamp().minus(Duration.ofDays(config.history().retentionDays()));
         state.violations().stream().filter(record -> !record.timestamp().isBefore(historyCutoff)).forEach(violations::add);
         if (!matches.isEmpty()) {
-            Optional<String> original = config.logging().storeOriginalMessages() ? Optional.of(sanitizeStored(context.rawMessage())) : Optional.empty();
-            violations.add(new ViolationRecord(UUID.randomUUID(), context.timestamp(), context.playerId(), context.playerName(),
-                    matches.stream().map(RuleMatch::ruleId).toList(), plan.decision(), score.pointsAdded(), score.pointsAfter(),
-                    plan.actions().stream().map(ModerationAction::type).distinct().toList(), original));
+            Optional<String> original = config.logging().storeOriginalMessages()
+                    ? Optional.of(sanitizeStored(context.rawMessage()))
+                    : Optional.empty();
+            com.maxello1.chatautomod.core.model.Severity severity = matches.stream()
+                    .map(RuleMatch::severity)
+                    .max((left, right) -> Integer.compare(left.ordinal(), right.ordinal()))
+                    .orElse(com.maxello1.chatautomod.core.model.Severity.LOW);
+            Optional<com.maxello1.chatautomod.core.model.MuteKind> muteKind =
+                    plan.actions().stream()
+                            .filter(ModerationAction.Mute.class::isInstance)
+                            .map(ModerationAction.Mute.class::cast)
+                            .map(ModerationAction.Mute::kind)
+                            .findFirst();
+            violations.add(new ViolationRecord(UUID.randomUUID(),
+                    context.timestamp(), context.playerId(), context.playerName(),
+                    matches.stream().map(RuleMatch::ruleId).toList(),
+                    matches.stream().map(RuleMatch::category).distinct().toList(),
+                    severity, plan.decision(), score.pointsAdded(), score.pointsAfter(),
+                    plan.actions().stream().map(ModerationAction::type)
+                            .distinct().toList(),
+                    muteKind, original));
         }
         trimFront(violations, config.history().maximumEntriesPerPlayer());
-        return new PlayerModerationState(state.revision() + 1, context.playerId(), context.playerName(), times, recent,
-                score.entries(), mute, violations, state.lastMuteNotificationAt(), context.timestamp());
+        java.util.Set<Integer> crossedThresholds = config.score().thresholds().stream()
+                .map(CompiledAutoModConfig.Threshold::points)
+                .filter(points -> score.pointsAfter() >= points)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        return new PlayerModerationState(state.revision() + 1,
+                context.playerId(), context.playerName(), times, recent,
+                score.entries(), crossedThresholds, mute, violations,
+                state.lastMuteNotificationAt(), context.timestamp());
     }
 
     private String sanitizeStored(String value) {

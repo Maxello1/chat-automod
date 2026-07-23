@@ -23,17 +23,37 @@ public final class ActionPlanner {
         String primaryRule = ruleIds.isEmpty() ? "none" : ruleIds.get(0);
         boolean notifyStaff = configured.stream().anyMatch(action -> action.type() == ActionType.NOTIFY_STAFF);
         Set<ModerationAction> actions = new LinkedHashSet<>();
+        ModerationAction.Mute strongestMute = null;
         for (ConfiguredAction action : configured) {
             switch (action.type()) {
                 case NOTIFY_STAFF -> { }
                 case WARN -> actions.add(new ModerationAction.Warn(context.playerId(), action.message()));
-                case MUTE -> actions.add(new ModerationAction.Mute(context.playerId(),
-                        safePlus(context.timestamp(), action.duration()), action.reason(), "automatic"));
+                case MUTE -> {
+                    com.maxello1.chatautomod.core.model.MuteKind kind =
+                            action.duration() == null
+                                    ? com.maxello1.chatautomod.core.model.MuteKind.PERMANENT
+                                    : com.maxello1.chatautomod.core.model.MuteKind.TEMPORARY;
+                    Instant until = action.duration() == null ? null
+                            : safePlus(context.timestamp(), action.duration());
+                    ModerationAction.Mute candidate = new ModerationAction.Mute(
+                            context.playerId(), kind, context.timestamp(), until,
+                            action.reason(), "automatic", primaryRule);
+                    if (strongestMute == null
+                            || candidate.kind() == com.maxello1.chatautomod.core.model.MuteKind.PERMANENT
+                            || strongestMute.kind()
+                                    != com.maxello1.chatautomod.core.model.MuteKind.PERMANENT
+                                    && candidate.until().isAfter(strongestMute.until())) {
+                        strongestMute = candidate;
+                    }
+                }
                 case KICK -> actions.add(new ModerationAction.Kick(context.playerId(), action.reason()));
                 case EXECUTE_COMMAND -> actions.add(new ModerationAction.ExecuteCommand(action.command().expand(
                         context.playerName(), context.playerId().toString(), score.pointsAfter(), primaryRule)));
                 case REPLACE_MATCH, REBROADCAST_MODIFIED, DISCORD_WEBHOOK -> throw new IllegalStateException("reserved action is not executable");
             }
+        }
+        if (strongestMute != null) {
+            actions.add(strongestMute);
         }
         if (notifyStaff) {
             actions.add(new ModerationAction.NotifyStaff(context.playerId(), context.playerName(), ruleIds,

@@ -11,6 +11,11 @@ import com.maxello1.chatautomod.core.action.ActionType;
 import com.maxello1.chatautomod.core.action.CommandTemplate;
 import com.maxello1.chatautomod.core.action.ConfiguredAction;
 import com.maxello1.chatautomod.core.action.RuleEffect;
+import com.maxello1.chatautomod.core.detector.BuiltInFilterMatchers;
+import com.maxello1.chatautomod.core.model.RuleCategory;
+import com.maxello1.chatautomod.core.model.Severity;
+import com.maxello1.chatautomod.core.normalize.FilterTextNormalizer;
+
 import com.maxello1.chatautomod.core.normalize.TextNormalizer;
 
 import java.net.IDN;
@@ -93,13 +98,14 @@ public final class ConfigLoader {
         require(raw.staffAlerts, "$.staff_alerts", problems);
         require(raw.normalization, "$.normalization", problems);
         require(raw.rules, "$.rules", problems);
+        require(raw.filterPacks, "$.filter_packs", problems);
         require(raw.score, "$.score", problems);
         require(raw.logging, "$.logging", problems);
         require(raw.history, "$.history", problems);
         require(raw.state, "$.state", problems);
         require(raw.mutes, "$.mutes", problems);
         if (raw.permissions == null || raw.staffAlerts == null || raw.normalization == null || raw.rules == null || raw.score == null || raw.logging == null
-                || raw.history == null || raw.state == null || raw.mutes == null) {
+                || raw.history == null || raw.state == null || raw.mutes == null || raw.filterPacks == null) {
             return null;
         }
 
@@ -111,17 +117,26 @@ public final class ConfigLoader {
         Duration muteButtonDuration = parseDuration(raw.staffAlerts.muteButtonDuration,
                 "$.staff_alerts.mute_button_duration", maximumMute, problems);
         if (muteButtonDuration == null) muteButtonDuration = Duration.ofMinutes(5);
-        if (raw.permissions.fallbackOperatorLevel < 0 || raw.permissions.fallbackOperatorLevel > 4) {
-            problems.add(new ConfigProblem("$.permissions.fallback_operator_level", "must be between 0 and 4"));
+        validateOperatorLevel(raw.permissions.commandFallbackOperatorLevel,
+                "$.permissions.command_fallback_operator_level", problems);
+        validateOperatorLevel(raw.permissions.staffFallbackOperatorLevel,
+                "$.permissions.staff_fallback_operator_level", problems);
+        validateOperatorLevel(raw.permissions.bypassFallbackOperatorLevel,
+                "$.permissions.bypass_fallback_operator_level", problems);
+        if (raw.permissions.legacyFallbackOperatorLevel != null) {
+            validateOperatorLevel(raw.permissions.legacyFallbackOperatorLevel,
+                    "$.permissions.fallback_operator_level", problems);
         }
 
         Map<Integer, String> lookalikes = compileSubstitutions(raw.normalization.lookalikeSubstitutions,
                 "$.normalization.lookalike_substitutions", problems);
         Map<Integer, String> leet = compileSubstitutions(raw.normalization.leetSubstitutions,
                 "$.normalization.leet_substitutions", problems);
+        Map<Integer, String> filterLeet = compileSubstitutions(raw.normalization.filterLeetSubstitutions,
+                "$.normalization.filter_leet_substitutions", problems);
         var normalization = new CompiledAutoModConfig.Normalization(raw.normalization.unicodeNfkc,
                 raw.normalization.removeZeroWidthCharacters, raw.normalization.normalizeLinkObfuscation,
-                lookalikes, leet);
+                lookalikes, leet, filterLeet);
 
         AutoModConfig.Rules rr = raw.rules;
         require(rr.rapidSpam, "$.rules.rapid_spam", problems);
@@ -177,8 +192,15 @@ public final class ConfigLoader {
                 new CompiledAutoModConfig.Advertising(rule(rr.advertising, "$.rules.advertising", maximumMute, problems), allowedDomains)
         );
 
-        TextNormalizer normalizer = new TextNormalizer(normalization);
-        List<CompiledAutoModConfig.CompiledFilter> filters = compileFilters(raw.filters, normalizer, maximumMute, problems);
+        FilterTextNormalizer filterNormalizer = new FilterTextNormalizer(normalization);
+        TextNormalizer legacyNormalizer = new TextNormalizer(normalization);
+        List<CompiledAutoModConfig.CompiledFilter> filters = compileFilters(
+                raw.filters, filterNormalizer, legacyNormalizer, maximumMute, problems);
+
+        String filterPackDirectory = compileFilterPackDirectory(
+                raw.filterPacks.directory, problems);
+        List<String> activeFilterPacks = compileActiveFilterPacks(
+                raw.filterPacks.active, problems);
 
         ConfigNumbers.validate(raw.score.pointDecayMinutes, 1, MAX_DECAY_MINUTES, "$.score.point_decay_minutes", problems);
         ConfigNumbers.validate(raw.score.maximumPointsPerMessage, 1, MAX_SCORE_CAP, "$.score.maximum_points_per_message", problems);
@@ -197,9 +219,15 @@ public final class ConfigLoader {
         ConfigNumbers.validate(raw.state.maximumScoreEntriesPerPlayer, 1, MAX_SCORE_ENTRIES, "$.state.maximum_score_entries_per_player", problems);
 
         return new CompiledAutoModConfig(raw.enabled,
-                new CompiledAutoModConfig.Permissions(Math.max(0, Math.min(4, raw.permissions.fallbackOperatorLevel))),
+                new CompiledAutoModConfig.Permissions(
+                        clampedOperatorLevel(configuredCommandFallback(raw.permissions)),
+                        clampedOperatorLevel(raw.permissions.staffFallbackOperatorLevel),
+                        raw.permissions.operatorsBypassModeration,
+                        clampedOperatorLevel(raw.permissions.bypassFallbackOperatorLevel)),
                 new CompiledAutoModConfig.StaffAlerts(raw.staffAlerts.showOriginal, muteButtonDuration),
-                normalization, rules, filters, score,
+                normalization, rules, filters,
+                new CompiledAutoModConfig.FilterPacks(raw.filterPacks.enabled,
+                        filterPackDirectory, activeFilterPacks), score,
                 new CompiledAutoModConfig.Logging(raw.logging.enabled, raw.logging.storeOriginalMessages,
                         ConfigNumbers.clamp(raw.logging.retentionDays, 1, 3650)),
                 new CompiledAutoModConfig.History(ConfigNumbers.clamp(raw.history.maximumEntriesPerPlayer, 1, MAX_HISTORY_ENTRIES),
@@ -210,67 +238,187 @@ public final class ConfigLoader {
     }
 
     private List<CompiledAutoModConfig.CompiledFilter> compileFilters(List<AutoModConfig.Filter> rawFilters,
-            TextNormalizer normalizer, Duration maximumMute, List<ConfigProblem> problems) {
+            FilterTextNormalizer filterNormalizer, TextNormalizer legacyNormalizer,
+            Duration maximumMute, List<ConfigProblem> problems) {
         if (rawFilters == null) {
             problems.add(new ConfigProblem("$.filters", "must not be null"));
             return List.of();
         }
         List<CompiledAutoModConfig.CompiledFilter> result = new ArrayList<>();
         Set<String> ids = new HashSet<>();
-        for (int i = 0; i < rawFilters.size(); i++) {
-            AutoModConfig.Filter filter = rawFilters.get(i);
-            String path = "$.filters[" + i + "]";
+        for (int index = 0; index < rawFilters.size(); index++) {
+            AutoModConfig.Filter filter = rawFilters.get(index);
+            String path = "$.filters[" + index + "]";
             if (filter == null) {
                 problems.add(new ConfigProblem(path, "must not be null"));
                 continue;
             }
-            if (filter.id == null || !RULE_ID.matcher(filter.id).matches()) {
+            String id = filter.id == null ? "" : filter.id;
+            if (!RULE_ID.matcher(id).matches()) {
                 problems.add(new ConfigProblem(path + ".id", "must match " + RULE_ID.pattern()));
-            } else if (RESERVED_RULE_IDS.contains(filter.id)) {
+            } else if (RESERVED_RULE_IDS.contains(id)) {
                 problems.add(new ConfigProblem(path + ".id", "collides with a built-in rule ID"));
-            } else if (!ids.add(filter.id)) {
+            } else if (!ids.add(id)) {
                 problems.add(new ConfigProblem(path + ".id", "duplicate filter ID"));
             }
-            FilterMatchMode mode;
-            try {
-                mode = FilterMatchMode.valueOf(String.valueOf(filter.matchMode).toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException exception) {
-                problems.add(new ConfigProblem(path + ".match_mode", "must be WORD, PHRASE, SUBSTRING, or COMPACT"));
-                mode = FilterMatchMode.WORD;
+
+            FilterMatchMode mode = parseEnum(FilterMatchMode.class, filter.matchMode,
+                    FilterMatchMode.NORMALIZED_WORD, path + ".match_mode", problems);
+            RuleCategory category = parseEnum(RuleCategory.class, filter.category,
+                    RuleCategory.FILTERED_CONTENT, path + ".category", problems);
+            Severity severity = parseEnum(Severity.class, filter.severity,
+                    Severity.MODERATE, path + ".severity", problems);
+            List<String> rawTerms = filter.terms == null ? List.of() : filter.terms;
+            List<String> rawPatterns = filter.patterns == null ? List.of() : filter.patterns;
+            if (rawTerms.isEmpty() && rawPatterns.isEmpty()) {
+                problems.add(new ConfigProblem(path, "must contain at least one term or built-in pattern"));
             }
-            if (filter.terms == null || filter.terms.isEmpty()) {
-                problems.add(new ConfigProblem(path + ".terms", "must contain at least one term"));
+            if (severity == Severity.SEVERE && (mode == FilterMatchMode.SUBSTRING
+                    || mode == FilterMatchMode.COMPACT
+                    || mode == FilterMatchMode.COMPACT_PHRASE)) {
+                problems.add(new ConfigProblem(path + ".match_mode",
+                        "unrestricted substring matching is not allowed for severe rules"));
             }
-            List<String> terms = compileFilterValues(filter.terms, mode, normalizer, path + ".terms", problems);
-            List<String> exceptions = compileFilterValues(filter.exceptions == null ? List.of() : filter.exceptions,
-                    mode, normalizer, path + ".exceptions", problems);
-            result.add(new CompiledAutoModConfig.CompiledFilter(filter.id == null ? "invalid" : filter.id, mode,
-                    terms, exceptions, rule(filter, path, maximumMute, problems)));
+            List<String> terms = compileFilterValues(rawTerms, mode,
+                    filterNormalizer, legacyNormalizer,
+                    path + ".terms", problems);
+            List<String> exceptions = compileFilterValues(
+                    filter.exceptions == null ? List.of() : filter.exceptions,
+                    mode, filterNormalizer, legacyNormalizer,
+                    path + ".exceptions", problems);
+            List<String> patterns = compileBuiltInPatterns(rawPatterns, path + ".patterns", problems);
+            CompiledAutoModConfig.RuleSettings settings = rule(filter, path, maximumMute, problems);
+            boolean permanentMute = settings.effect().directActions().stream()
+                    .anyMatch(action -> action.type() == ActionType.MUTE && action.duration() == null);
+            boolean notifiesStaff = settings.effect().directActions().stream()
+                    .anyMatch(action -> action.type() == ActionType.NOTIFY_STAFF);
+            if (permanentMute && !notifiesStaff) {
+                problems.add(new ConfigProblem(path + ".actions",
+                        "permanent-mute rules must include NOTIFY_STAFF"));
+            }
+            result.add(new CompiledAutoModConfig.CompiledFilter(
+                    id.isEmpty() ? "invalid" : id, category, severity, mode,
+                    terms, patterns, exceptions, settings));
         }
-        return result;
+        return List.copyOf(result);
     }
 
-    private List<String> compileFilterValues(List<String> values, FilterMatchMode mode, TextNormalizer normalizer,
+    private List<String> compileFilterValues(List<String> values, FilterMatchMode mode,
+            FilterTextNormalizer filterNormalizer, TextNormalizer legacyNormalizer,
             String path, List<ConfigProblem> problems) {
         List<String> result = new ArrayList<>();
-        for (int i = 0; i < values.size(); i++) {
-            String value = values.get(i);
+        for (int index = 0; index < values.size(); index++) {
+            String value = values.get(index);
+            String itemPath = path + "[" + index + "]";
             if (value == null || value.isBlank()) {
-                problems.add(new ConfigProblem(path + "[" + i + "]", "must not be blank"));
+                problems.add(new ConfigProblem(itemPath, "must not be blank"));
                 continue;
             }
-            var normalized = normalizer.normalize(value);
-            String compiled = mode == FilterMatchMode.COMPACT ? normalized.compact() : normalized.deobfuscated();
+            if (value.codePoints().anyMatch(Character::isISOControl)) {
+                problems.add(new ConfigProblem(itemPath, "must not contain control characters"));
+                continue;
+            }
+            int length = value.codePointCount(0, value.length());
+            if (length > 256) {
+                problems.add(new ConfigProblem(itemPath, "must contain at most 256 characters"));
+                continue;
+            }
+            String compiled;
+            if (isLegacyFilterMode(mode)) {
+                var normalized = legacyNormalizer.normalize(value);
+                compiled = mode == FilterMatchMode.COMPACT
+                        ? normalized.compact() : normalized.deobfuscated();
+            } else {
+                var normalized = filterNormalizer.normalize(value);
+                compiled = switch (mode) {
+                    case COMPACT_WORD, COMPACT_PHRASE -> normalized.compact();
+                    default -> normalized.normalized();
+                };
+            }
             if (compiled.isEmpty()) {
-                problems.add(new ConfigProblem(path + "[" + i + "]", "must not normalize to an empty value"));
+                problems.add(new ConfigProblem(itemPath, "must not normalize to an empty value"));
                 continue;
             }
-            if (mode == FilterMatchMode.COMPACT && compiled.codePointCount(0, compiled.length()) < 4) {
-                problems.add(new ConfigProblem(path + "[" + i + "]", "compact terms must contain at least four characters"));
+            if ((mode == FilterMatchMode.COMPACT || mode == FilterMatchMode.COMPACT_WORD
+                    || mode == FilterMatchMode.COMPACT_PHRASE)
+                    && compiled.codePointCount(0, compiled.length()) < 4) {
+                problems.add(new ConfigProblem(itemPath,
+                        "compact terms must contain at least four characters"));
             }
             result.add(compiled);
         }
         return List.copyOf(new LinkedHashSet<>(result));
+    }
+
+    private List<String> compileBuiltInPatterns(List<String> values, String path,
+            List<ConfigProblem> problems) {
+        List<String> result = new ArrayList<>();
+        for (int index = 0; index < values.size(); index++) {
+            String value = values.get(index);
+            if (value == null || !BuiltInFilterMatchers.supported(value)) {
+                problems.add(new ConfigProblem(path + "[" + index + "]",
+                        "unsupported built-in pattern"));
+            } else {
+                result.add(value);
+            }
+        }
+        return List.copyOf(new LinkedHashSet<>(result));
+    }
+
+    private String compileFilterPackDirectory(String value,
+            List<ConfigProblem> problems) {
+        if (value == null || value.isBlank()) {
+            problems.add(new ConfigProblem("$.filter_packs.directory",
+                    "must not be blank"));
+            return "filters";
+        }
+        if (value.length() > 256
+                || !value.matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}(?:/[a-zA-Z0-9][a-zA-Z0-9._-]{0,63})*")) {
+            problems.add(new ConfigProblem("$.filter_packs.directory",
+                    "must be a safe relative directory using letters, digits, '.', '_', '-' and '/'"));
+            return "filters";
+        }
+        return value;
+    }
+
+    private List<String> compileActiveFilterPacks(List<String> values,
+            List<ConfigProblem> problems) {
+        if (values == null) {
+            problems.add(new ConfigProblem("$.filter_packs.active",
+                    "must be an array"));
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (int index = 0; index < values.size(); index++) {
+            String value = values.get(index);
+            String path = "$.filter_packs.active[" + index + "]";
+            if (value == null || !value.matches("[a-z0-9][a-z0-9_-]{0,63}")) {
+                problems.add(new ConfigProblem(path, "must be a valid filter-pack ID"));
+            } else if (!seen.add(value)) {
+                problems.add(new ConfigProblem(path, "duplicate pack ID"));
+            } else {
+                result.add(value);
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private static boolean isLegacyFilterMode(FilterMatchMode mode) {
+        return mode == FilterMatchMode.WORD
+                || mode == FilterMatchMode.PHRASE
+                || mode == FilterMatchMode.SUBSTRING
+                || mode == FilterMatchMode.COMPACT;
+    }
+
+    private <E extends Enum<E>> E parseEnum(Class<E> type, String raw, E fallback,
+            String path, List<ConfigProblem> problems) {
+        try {
+            return Enum.valueOf(type, String.valueOf(raw).toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            problems.add(new ConfigProblem(path, "unsupported value: " + raw));
+            return fallback;
+        }
     }
 
     private List<CompiledAutoModConfig.Threshold> compileThresholds(List<AutoModConfig.Threshold> rawThresholds,
@@ -350,9 +498,16 @@ public final class ConfigLoader {
                             valueOr(object, "message", "Please follow the server chat rules."), null, "", null));
                     case "MUTE" -> {
                         String durationValue = valueOr(object, "duration", null);
-                        Duration duration = parseDuration(durationValue, itemPath + ".duration", maximumMute, problems);
-                        if (duration != null) actions.add(new ConfiguredAction(ActionType.MUTE, "", duration,
-                                valueOr(object, "reason", "Chat rule violation"), null));
+                        String reason = valueOr(object, "reason", "Chat rule violation");
+                        if ("permanent".equalsIgnoreCase(durationValue)) {
+                            actions.add(new ConfiguredAction(ActionType.MUTE, "", null, reason, null));
+                        } else {
+                            Duration duration = parseDuration(durationValue,
+                                    itemPath + ".duration", maximumMute, problems);
+                            if (duration != null) {
+                                actions.add(new ConfiguredAction(ActionType.MUTE, "", duration, reason, null));
+                            }
+                        }
                     }
                     case "KICK" -> actions.add(new ConfiguredAction(ActionType.KICK, "", null,
                             valueOr(object, "reason", "Repeated chat violations."), null));
@@ -432,8 +587,18 @@ public final class ConfigLoader {
     private void validateScalarTypes(JsonObject root, List<ConfigProblem> problems) {
         numberField(root, "schema_version", "$.schema_version", problems);
         booleanField(root, "enabled", "$.enabled", problems);
-        object(root, "permissions").ifPresent(value ->
-                numberField(value, "fallback_operator_level", "$.permissions.fallback_operator_level", problems));
+        object(root, "permissions").ifPresent(value -> {
+            numberField(value, "fallback_operator_level",
+                    "$.permissions.fallback_operator_level", problems);
+            numberField(value, "command_fallback_operator_level",
+                    "$.permissions.command_fallback_operator_level", problems);
+            numberField(value, "staff_fallback_operator_level",
+                    "$.permissions.staff_fallback_operator_level", problems);
+            booleanField(value, "operators_bypass_moderation",
+                    "$.permissions.operators_bypass_moderation", problems);
+            numberField(value, "bypass_fallback_operator_level",
+                    "$.permissions.bypass_fallback_operator_level", problems);
+        });
         object(root, "staff_alerts").ifPresent(value ->
                 booleanField(value, "show_original", "$.staff_alerts.show_original", problems));
         object(root, "normalization").ifPresent(value -> {
@@ -442,6 +607,25 @@ public final class ConfigLoader {
                     "$.normalization.remove_zero_width_characters", problems);
             booleanField(value, "normalize_link_obfuscation",
                     "$.normalization.normalize_link_obfuscation", problems);
+        });
+        object(root, "filter_packs").ifPresent(value -> {
+            booleanField(value, "enabled", "$.filter_packs.enabled", problems);
+            stringField(value, "directory", "$.filter_packs.directory", problems);
+            JsonElement active = value.get("active");
+            if (active != null && !active.isJsonArray()) {
+                problems.add(new ConfigProblem("$.filter_packs.active",
+                        "must be a JSON array"));
+            } else if (active != null) {
+                JsonArray entries = active.getAsJsonArray();
+                for (int index = 0; index < entries.size(); index++) {
+                    JsonElement entry = entries.get(index);
+                    if (!entry.isJsonPrimitive()
+                            || !entry.getAsJsonPrimitive().isString()) {
+                        problems.add(new ConfigProblem("$.filter_packs.active["
+                                + index + "]", "must be a JSON string"));
+                    }
+                }
+            }
         });
         object(root, "rules").ifPresent(rules -> {
             ruleScalarTypes(rules, "rapid_spam",
@@ -522,14 +706,25 @@ public final class ConfigLoader {
         }
     }
 
+    private static void stringField(JsonObject object, String name, String path,
+            List<ConfigProblem> problems) {
+        JsonElement value = object.get(name);
+        if (value != null && (!value.isJsonPrimitive()
+                || !value.getAsJsonPrimitive().isString())) {
+            problems.add(new ConfigProblem(path, "must be a JSON string"));
+        }
+    }
+
     private void validateUnknownFields(JsonObject root, List<ConfigProblem> problems) {
-        checkFields(root, "$", Set.of("schema_version", "enabled", "permissions", "staff_alerts", "normalization", "rules", "filters", "score",
+        checkFields(root, "$", Set.of("schema_version", "enabled", "permissions", "staff_alerts", "normalization", "rules", "filters", "filter_packs", "score",
                 "logging", "history", "state", "mutes"), problems);
-        object(root, "permissions").ifPresent(o -> checkFields(o, "$.permissions", Set.of("fallback_operator_level"), problems));
+        object(root, "permissions").ifPresent(o -> checkFields(o, "$.permissions", Set.of(
+                "fallback_operator_level", "command_fallback_operator_level", "staff_fallback_operator_level",
+                "operators_bypass_moderation", "bypass_fallback_operator_level"), problems));
         object(root, "staff_alerts").ifPresent(o -> checkFields(o, "$.staff_alerts", Set.of("show_original", "mute_button_duration"), problems));
         object(root, "normalization").ifPresent(o -> checkFields(o, "$.normalization", Set.of("unicode_nfkc",
                 "remove_zero_width_characters", "normalize_link_obfuscation", "lookalike_substitutions",
-                "leet_substitutions"), problems));
+                "leet_substitutions", "filter_leet_substitutions"), problems));
         object(root, "rules").ifPresent(rules -> {
             checkFields(rules, "$.rules", Set.of("rapid_spam", "duplicate_spam", "similarity_spam", "caps",
                     "repeated_characters", "message_length", "advertising"), problems);
@@ -544,8 +739,10 @@ public final class ConfigLoader {
         });
         array(root, "filters").ifPresent(a -> {
             for (int i = 0; i < a.size(); i++) if (a.get(i).isJsonObject()) checkFields(a.get(i).getAsJsonObject(),
-                    "$.filters[" + i + "]", Set.of("id", "enabled", "points", "actions", "match_mode", "terms", "exceptions"), problems);
+                    "$.filters[" + i + "]", Set.of("id", "category", "severity", "enabled", "points",
+                            "actions", "match_mode", "terms", "patterns", "exceptions"), problems);
         });
+        object(root, "filter_packs").ifPresent(o -> checkFields(o, "$.filter_packs", Set.of("enabled", "directory", "active"), problems));
         object(root, "score").ifPresent(o -> {
             checkFields(o, "$.score", Set.of("point_decay_minutes", "maximum_points_per_message", "threshold_mode", "thresholds"), problems);
             array(o, "thresholds").ifPresent(a -> {
@@ -594,6 +791,23 @@ public final class ConfigLoader {
 
     private static void require(Object value, String path, List<ConfigProblem> problems) {
         if (value == null) problems.add(new ConfigProblem(path, "is required"));
+    }
+
+    private static void validateOperatorLevel(int value, String path,
+            List<ConfigProblem> problems) {
+        if (value < 0 || value > 4) {
+            problems.add(new ConfigProblem(path, "must be between 0 and 4"));
+        }
+    }
+
+    private static int clampedOperatorLevel(int value) {
+        return Math.max(0, Math.min(4, value));
+    }
+
+    private static int configuredCommandFallback(AutoModConfig.Permissions permissions) {
+        return permissions.legacyFallbackOperatorLevel == null
+                ? permissions.commandFallbackOperatorLevel
+                : permissions.legacyFallbackOperatorLevel;
     }
 
     private static void validatePositive(long value, String path, List<ConfigProblem> problems) {

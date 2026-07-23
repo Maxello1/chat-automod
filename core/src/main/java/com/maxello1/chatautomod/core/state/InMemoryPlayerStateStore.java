@@ -93,7 +93,7 @@ public final class InMemoryPlayerStateStore implements PlayerStateStore {
                         ? new PlayerModerationState(state.revision() + 1, state.playerId(), state.lastKnownName(),
                                 inactive ? List.of() : state.recentMessageTimes(),
                                 inactive ? List.of() : state.recentMessages(),
-                                activeScores, activeMute, retainedViolations,
+                                activeScores, state.crossedThresholds(), activeMute, retainedViolations,
                                 inactive ? Optional.empty() : state.lastMuteNotificationAt(), state.lastActivityAt())
                         : state;
                 if (inactive && !cleaned.hasDurableData(now)) {

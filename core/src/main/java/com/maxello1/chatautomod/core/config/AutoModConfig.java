@@ -17,6 +17,7 @@ public final class AutoModConfig {
     public Normalization normalization = new Normalization();
     public Rules rules = new Rules();
     public List<Filter> filters = new ArrayList<>();
+    @SerializedName("filter_packs") public FilterPacks filterPacks = new FilterPacks();
     public Score score = new Score();
     public Logging logging = new Logging();
     public History history = new History();
@@ -32,7 +33,11 @@ public final class AutoModConfig {
     }
 
     public static final class Permissions {
-        @SerializedName("fallback_operator_level") public int fallbackOperatorLevel = 3;
+        @SerializedName("fallback_operator_level") public Integer legacyFallbackOperatorLevel;
+        @SerializedName("command_fallback_operator_level") public int commandFallbackOperatorLevel = 3;
+        @SerializedName("staff_fallback_operator_level") public int staffFallbackOperatorLevel = 3;
+        @SerializedName("operators_bypass_moderation") public boolean operatorsBypassModeration = false;
+        @SerializedName("bypass_fallback_operator_level") public int bypassFallbackOperatorLevel = 4;
     }
 
     public static final class StaffAlerts {
@@ -46,6 +51,7 @@ public final class AutoModConfig {
         @SerializedName("normalize_link_obfuscation") public boolean normalizeLinkObfuscation = true;
         @SerializedName("lookalike_substitutions") public Map<String, String> lookalikeSubstitutions = defaultLookalikes();
         @SerializedName("leet_substitutions") public Map<String, String> leetSubstitutions = defaultLeet();
+        @SerializedName("filter_leet_substitutions") public Map<String, String> filterLeetSubstitutions = defaultFilterLeet();
 
         private static Map<String, String> defaultLeet() {
             Map<String, String> result = new LinkedHashMap<>();
@@ -56,6 +62,23 @@ public final class AutoModConfig {
             result.put("7", "t");
             result.put("@", "a");
             result.put("$", "s");
+            return result;
+        }
+
+        private static Map<String, String> defaultFilterLeet() {
+            Map<String, String> result = new LinkedHashMap<>();
+            result.put("0", "o");
+            result.put("1", "i");
+            result.put("!", "i");
+            result.put("|", "i");
+            result.put("3", "e");
+            result.put("4", "a");
+            result.put("@", "a");
+            result.put("5", "s");
+            result.put("$", "s");
+            result.put("6", "g");
+            result.put("9", "g");
+            result.put("7", "t");
             return result;
         }
 
@@ -160,14 +183,25 @@ public final class AutoModConfig {
 
     public static final class Filter extends Rule {
         public String id = "";
+        public String category = "FILTERED_CONTENT";
+        public String severity = "MODERATE";
         @SerializedName("match_mode") public String matchMode = "WORD";
         public List<String> terms = new ArrayList<>();
+        public List<String> patterns = new ArrayList<>();
         public List<String> exceptions = new ArrayList<>();
+    }
+
+    public static final class FilterPacks {
+        public boolean enabled = true;
+        public String directory = "filters";
+        public List<String> active = new ArrayList<>(List.of(
+                "abusive-language", "identity-harassment",
+                "racist-slurs", "antisemitism-extremism"));
     }
 
     public static final class Score {
         @SerializedName("point_decay_minutes") public long pointDecayMinutes = 30;
-        @SerializedName("maximum_points_per_message") public int maximumPointsPerMessage = 10;
+        @SerializedName("maximum_points_per_message") public int maximumPointsPerMessage = 20;
         @SerializedName("threshold_mode") public String thresholdMode = "HIGHEST_CROSSED";
         public List<Threshold> thresholds = new ArrayList<>();
     }

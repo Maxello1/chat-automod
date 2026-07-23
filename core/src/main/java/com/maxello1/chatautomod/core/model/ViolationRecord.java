@@ -15,10 +15,13 @@ public record ViolationRecord(
         UUID playerId,
         String playerName,
         List<String> ruleIds,
+        List<RuleCategory> categories,
+        Severity severity,
         MessageDecision decision,
         int pointsAdded,
         int scoreAfter,
         List<ActionType> actions,
+        Optional<MuteKind> muteKind,
         Optional<String> originalMessage
 ) {
     public ViolationRecord {
@@ -27,8 +30,20 @@ public record ViolationRecord(
         Objects.requireNonNull(playerId, "playerId");
         playerName = Objects.requireNonNull(playerName, "playerName");
         ruleIds = List.copyOf(ruleIds);
+        categories = List.copyOf(categories);
+        severity = Objects.requireNonNull(severity, "severity");
         Objects.requireNonNull(decision, "decision");
         actions = List.copyOf(actions);
+        muteKind = muteKind == null ? Optional.empty() : muteKind;
         originalMessage = originalMessage == null ? Optional.empty() : originalMessage;
+    }
+
+    public ViolationRecord(UUID eventId, Instant timestamp, UUID playerId,
+            String playerName, List<String> ruleIds, MessageDecision decision,
+            int pointsAdded, int scoreAfter, List<ActionType> actions,
+            Optional<String> originalMessage) {
+        this(eventId, timestamp, playerId, playerName, ruleIds, List.of(),
+                Severity.MODERATE, decision, pointsAdded, scoreAfter, actions,
+                Optional.empty(), originalMessage);
     }
 }

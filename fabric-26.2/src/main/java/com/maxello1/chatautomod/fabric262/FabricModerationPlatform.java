@@ -1,10 +1,10 @@
 package com.maxello1.chatautomod.fabric262;
 
-import com.maxello1.chatautomod.core.action.ActionPlan;
 import com.maxello1.chatautomod.core.action.ModerationAction;
 import com.maxello1.chatautomod.core.api.MinecraftPlatformAdapter;
 import com.maxello1.chatautomod.core.api.PlatformPlayer;
 import com.maxello1.chatautomod.core.api.StaffRecipient;
+import com.maxello1.chatautomod.core.model.MuteKind;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.ClickEvent;
 import net.minecraft.network.chat.Component;
@@ -28,22 +28,6 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
     }
 
-    void execute(ActionPlan plan) {
-        for (ModerationAction action : plan.actions()) {
-            try {
-                switch (action) {
-                    case ModerationAction.NotifyStaff alert -> notifyStaff(alert);
-                    case ModerationAction.Warn warning -> notifyPlayer(warning.playerId(), warning.message());
-                    case ModerationAction.Mute mute -> mutePlayer(mute.playerId(), mute.until(), mute.reason());
-                    case ModerationAction.Kick kick -> kickPlayer(kick.playerId(), kick.reason());
-                    case ModerationAction.ExecuteCommand command -> executeServerCommand(command.command());
-                }
-            } catch (RuntimeException exception) {
-                runtime.logActionFailure(action.type(), exception);
-            }
-        }
-    }
-
     @Override
     public Path configDirectory() {
         return runtime.configDirectory();
@@ -60,20 +44,21 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
         if (server == null) {
             return java.util.List.of();
         }
-        int fallback = runtime.fallbackOperatorLevel();
+        int staffFallback = runtime.staffFallbackOperatorLevel();
+        int commandFallback = runtime.commandFallbackOperatorLevel();
         return server.getPlayerList().getPlayers().stream()
                 .filter(player -> runtime.permissions().hasPermission(
                         player,
                         FabricPermissionService.ALERTS,
-                        fallback))
+                        staffFallback))
                 .map(player -> new StaffRecipient(
                         player.getUUID(),
-                        player.getName().getString(),
+                        player.getGameProfile().name(),
                         runtime.inspectEnabled(player.getUUID())
                                 && runtime.permissions().hasPermission(
                                 player,
                                 FabricPermissionService.INSPECT,
-                                fallback)))
+                                commandFallback)))
                 .toList();
     }
 
@@ -84,33 +69,37 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
             return Optional.empty();
         }
         return Optional.ofNullable(server.getPlayerList().getPlayer(uuid))
-                .map(player -> new PlatformPlayer(player.getUUID(), player.getName().getString()));
+                .map(player -> new PlatformPlayer(player.getUUID(), player.getGameProfile().name()));
     }
 
     @Override
     public void notifyPlayer(UUID playerId, String message) {
-        MinecraftServer server = runtime.server();
-        if (server == null) {
-            return;
-        }
-        ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-        if (player != null) {
-            player.sendSystemMessage(Component.literal(safeText(message)));
-        }
+        runOnServerThread(() -> {
+            MinecraftServer server = runtime.server();
+            if (server == null) {
+                return;
+            }
+            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            if (player != null) {
+                player.sendSystemMessage(Component.literal(safeText(message)));
+            }
+        });
     }
 
     @Override
     public void notifyStaff(ModerationAction.NotifyStaff alert) {
-        MinecraftServer server = runtime.server();
-        if (server == null) {
-            return;
-        }
-        for (StaffRecipient recipient : onlineStaff()) {
-            ServerPlayer player = server.getPlayerList().getPlayer(recipient.playerId());
-            if (player != null) {
-                player.sendSystemMessage(staffAlert(alert, recipient.inspectEnabled()));
+        runOnServerThread(() -> {
+            MinecraftServer server = runtime.server();
+            if (server == null) {
+                return;
             }
-        }
+            for (StaffRecipient recipient : onlineStaff()) {
+                ServerPlayer player = server.getPlayerList().getPlayer(recipient.playerId());
+                if (player != null) {
+                    player.sendSystemMessage(staffAlert(alert, recipient.inspectEnabled()));
+                }
+            }
+        });
     }
 
     private Component staffAlert(ModerationAction.NotifyStaff alert, boolean inspectEnabled) {
@@ -128,7 +117,11 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
                     .withStyle(ChatFormatting.DARK_GRAY)
                     .append(Component.literal(safeText(alert.originalMessage())).withStyle(ChatFormatting.WHITE))
                     .append(Component.literal("\"").withStyle(ChatFormatting.DARK_GRAY)));
+        } else {
+            message.append(Component.literal("\nMessage content hidden by privacy settings")
+                    .withStyle(ChatFormatting.DARK_GRAY));
         }
+        message.append(Component.literal("\nMatched rule: " + safeText(rules)).withStyle(ChatFormatting.DARK_GRAY));
 
         Component hover = Component.literal("Rules: " + safeText(rules)
                 + "\nScore: " + alert.scoreAfter()
@@ -139,13 +132,22 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
                 "/automod history " + target,
                 hover,
                 ChatFormatting.AQUA);
-        Duration muteDuration = runtime.muteButtonDuration();
-        MutableComponent mute = button(
-                "[Mute " + compactDuration(muteDuration) + "]",
-                "/automod mute " + target + " " + compactDuration(muteDuration) + " Staff alert action",
+        MutableComponent unmute = button(
+                "[Unmute]",
+                "/automod unmute " + target,
                 hover,
-                ChatFormatting.RED);
-        return message.append(Component.literal("\n")).append(history).append(Component.literal(" ")).append(mute);
+                ChatFormatting.GREEN);
+        MutableComponent inspect = button(
+                "[Inspect]",
+                "/automod inspect on",
+                hover,
+                ChatFormatting.YELLOW);
+        return message.append(Component.literal("\n"))
+                .append(history)
+                .append(Component.literal(" "))
+                .append(unmute)
+                .append(Component.literal(" "))
+                .append(inspect);
     }
 
     private static MutableComponent button(
@@ -161,50 +163,95 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
                 .withHoverEvent(new HoverEvent.ShowText(hover)));
     }
 
+    void applyAutomaticMute(ModerationAction.Mute mute) {
+        runOnServerThread(() -> runtime.ensureAutomaticMute(mute)
+                .ifPresent(applied -> notifyMuteApplied(mute.playerId(), applied)));
+    }
+
     @Override
     public void mutePlayer(UUID playerId, Instant until, String reason) {
-        runtime.ensureAutomaticMute(playerId, until, safeText(reason));
-        notifyPlayer(playerId, "You have been muted until " + until + ". Reason: " + safeText(reason));
+        runOnServerThread(() -> runtime.ensureAutomaticTemporaryMute(
+                        playerId, until, reason, "automatic", "unknown")
+                .ifPresent(applied -> notifyMuteApplied(playerId, applied)));
+    }
+
+    private void notifyMuteApplied(UUID playerId, com.maxello1.chatautomod.core.model.MuteState mute) {
+        String safeReason = safeText(mute.reason());
+        if (mute.kind() == MuteKind.PERMANENT) {
+            notifyPlayer(playerId, "You have been permanently muted. Reason: " + safeReason);
+        } else {
+            notifyPlayer(playerId, "You have been muted until " + mute.mutedUntil()
+                    + ". Reason: " + safeReason);
+        }
     }
 
     @Override
     public void kickPlayer(UUID playerId, String reason) {
-        MinecraftServer server = runtime.server();
-        if (server == null) {
-            return;
-        }
-        ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-        if (player != null) {
-            player.connection.disconnect(Component.literal(safeText(reason)));
-        }
+        runOnServerThread(() -> {
+            MinecraftServer server = runtime.server();
+            if (server == null) {
+                return;
+            }
+            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            if (player != null) {
+                player.connection.disconnect(Component.literal(safeText(reason)));
+            }
+        });
     }
 
     @Override
     public void executeServerCommand(String command) {
-        MinecraftServer server = runtime.server();
-        if (server == null || command == null || command.isBlank()) {
+        if (command == null || command.isBlank()) {
             return;
         }
         String normalized = command.startsWith("/") ? command.substring(1) : command;
-        server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), normalized);
+        if (normalized.isBlank() || normalized.codePoints().anyMatch(Character::isISOControl)) {
+            return;
+        }
+        runOnServerThread(() -> {
+            MinecraftServer server = runtime.server();
+            if (server != null) {
+                server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), normalized);
+            }
+        });
     }
 
-    private static String compactDuration(Duration duration) {
+    private void runOnServerThread(Runnable task) {
+        MinecraftServer server = runtime.server();
+        if (server == null) {
+            return;
+        }
+        if (server.isSameThread()) {
+            task.run();
+        } else {
+            server.execute(task);
+        }
+    }
+
+    static String compactDuration(Duration duration) {
         long seconds = Math.max(1, duration.toSeconds());
-        if (seconds % 604_800 == 0) return (seconds / 604_800) + "w";
-        if (seconds % 86_400 == 0) return (seconds / 86_400) + "d";
-        if (seconds % 3_600 == 0) return (seconds / 3_600) + "h";
-        if (seconds % 60 == 0) return (seconds / 60) + "m";
-        return seconds + "s";
+        long days = seconds / 86_400;
+        seconds %= 86_400;
+        long hours = seconds / 3_600;
+        seconds %= 3_600;
+        long minutes = seconds / 60;
+        seconds %= 60;
+        StringBuilder value = new StringBuilder();
+        if (days > 0) value.append(days).append("d ");
+        if (hours > 0) value.append(hours).append("h ");
+        if (minutes > 0) value.append(minutes).append("m ");
+        if (seconds > 0 || value.isEmpty()) value.append(seconds).append("s");
+        return value.toString().trim();
     }
 
-    private static String safeText(String value) {
+    static String safeText(String value) {
         if (value == null) {
             return "";
         }
         StringBuilder result = new StringBuilder(Math.min(value.length(), 512));
         value.codePoints()
                 .filter(codePoint -> !Character.isISOControl(codePoint)
+                        && (codePoint < 0xD800 || codePoint > 0xDFFF)
                         && codePoint != 0x2028
                         && codePoint != 0x2029)
                 .limit(512)

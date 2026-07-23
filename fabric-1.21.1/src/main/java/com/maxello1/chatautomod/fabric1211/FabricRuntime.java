@@ -144,6 +144,7 @@ final class FabricRuntime {
         }
         writeDefaultIfMissing(activeFiltersDirectory.resolve("exceptions.json"),
                 configs.defaultExceptionsJson());
+        new FabricFilterPackMigrator(configDirectory, logger).apply(activeFiltersDirectory);
     }
 
     private static void writeDefaultIfMissing(Path path, String content) throws IOException {

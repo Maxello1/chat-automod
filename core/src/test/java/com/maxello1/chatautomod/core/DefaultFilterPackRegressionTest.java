@@ -2,6 +2,7 @@ package com.maxello1.chatautomod.core;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.maxello1.chatautomod.core.action.ModerationAction;
@@ -51,7 +52,8 @@ class DefaultFilterPackRegressionTest {
         for (String allowed : List.of(
                 "night", "nights", "bigger", "trigger", "Nigeria",
                 "Nigerian", "Niger", "assignment", "signal", "original",
-                "I am gay", "gay rights", "gay marriage", "the character is gay")) {
+                "I am gay", "gay rights", "gay marriage", "the character is gay",
+                "I hate jewelry ads", "this item is a jewel", "the museum has Jewish history")) {
             var report = preview(DEFAULTS, allowed, NOW,
                     PlayerModerationState.empty(PLAYER, "Tester", NOW)).report();
             assertTrue(report.matches().stream().noneMatch(match ->
@@ -59,6 +61,26 @@ class DefaultFilterPackRegressionTest {
                                     || match.category() == RuleCategory.IDENTITY_HARASSMENT),
                     () -> "unexpected filtered-content match for: " + allowed
                             + " -> " + report.matches());
+        }
+    }
+
+    @Test
+    void canonicalSevereTermsAreExplicitAndRetainPermanentMutePolicy() {
+        assertSevereDefaultRule("racism.nword-family", List.of("nigger", "nigga", "nibba"));
+        assertSevereDefaultRule("extremism.severe-antisemitism", List.of("hate jew", "hate jews"));
+
+        for (String message : List.of(
+                "nigger", "NIGGA", "nibba", "HATE JEW", "hate jews")) {
+            var report = preview(DEFAULTS, message, NOW,
+                    PlayerModerationState.empty(PLAYER, "Tester", NOW)).report();
+            assertEquals(MessageDecision.BLOCK, report.decision(), message);
+            assertEquals(20, report.pointsAdded(), message);
+            assertTrue(report.actionsThatWouldRun().stream()
+                    .anyMatch(ModerationAction.NotifyStaff.class::isInstance), message);
+            assertTrue(report.actionsThatWouldRun().stream()
+                    .filter(ModerationAction.Mute.class::isInstance)
+                    .map(ModerationAction.Mute.class::cast)
+                    .anyMatch(mute -> mute.kind() == MuteKind.PERMANENT && mute.until() == null), message);
         }
     }
 
@@ -190,6 +212,30 @@ class DefaultFilterPackRegressionTest {
             result.add(value);
         }
         return result;
+    }
+
+    private static void assertSevereDefaultRule(String ruleId, List<String> requiredTerms) {
+        ActiveConfig active = new ActiveConfig();
+        JsonObject rule = active.defaultFilterPacks().values().stream()
+                .map(JsonParser::parseString)
+                .map(element -> element.getAsJsonObject().getAsJsonArray("rules"))
+                .flatMap(array -> java.util.stream.StreamSupport.stream(array.spliterator(), false))
+                .map(element -> element.getAsJsonObject())
+                .filter(candidate -> ruleId.equals(candidate.get("id").getAsString()))
+                .findFirst()
+                .orElseThrow();
+        List<String> terms = java.util.stream.StreamSupport
+                .stream(rule.getAsJsonArray("terms").spliterator(), false)
+                .map(element -> element.getAsString())
+                .toList();
+        assertTrue(terms.containsAll(requiredTerms), () -> ruleId + " terms: " + terms);
+        assertEquals("SEVERE", rule.get("severity").getAsString());
+        assertTrue(java.util.stream.StreamSupport
+                .stream(rule.getAsJsonArray("actions").spliterator(), false)
+                .filter(JsonElement::isJsonObject)
+                .map(JsonElement::getAsJsonObject)
+                .anyMatch(action -> "MUTE".equals(action.get("type").getAsString())
+                        && "permanent".equals(action.get("duration").getAsString())));
     }
 
     private static String spaced(String value) {

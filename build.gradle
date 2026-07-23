@@ -13,6 +13,6 @@ allprojects {
 
 tasks.register('releaseBuild') {
     group = 'build'
-    description = 'Builds and verifies the Minecraft 1.21.1 release.'
-    dependsOn ':core:test', ':fabric-1.21.1:build'
+    description = 'Builds and verifies both supported Fabric releases.'
+    dependsOn ':core:test', ':fabric-1.21.1:build', ':fabric-26.2:build'
 }

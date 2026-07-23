@@ -30,16 +30,19 @@ final class FabricAuditLogger implements AutoCloseable {
 
     private final Path logDirectory;
     private final Logger logger;
-    private final int initialRetentionDays;
     private final ArrayBlockingQueue<Envelope> queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
-    private final AtomicBoolean open = new AtomicBoolean(true);
+    private final Object lifecycleLock = new Object();
+    private final AtomicBoolean accepting = new AtomicBoolean(true);
+    private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicLong dropped = new AtomicLong();
     private final Thread writerThread;
 
-    FabricAuditLogger(Path worldDataDirectory, Logger logger, int initialRetentionDays) {
+    FabricAuditLogger(Path worldDataDirectory, Logger logger, int initialRetentionDays) throws IOException {
         this.logDirectory = Objects.requireNonNull(worldDataDirectory, "worldDataDirectory").resolve("logs");
         this.logger = Objects.requireNonNull(logger, "logger");
-        this.initialRetentionDays = Math.max(1, initialRetentionDays);
+        int retentionDays = Math.max(1, initialRetentionDays);
+        Files.createDirectories(logDirectory);
+        deleteExpiredLogs(LocalDate.now(ZoneOffset.UTC), retentionDays);
         this.writerThread = Thread.ofPlatform()
                 .name("Chat AutoMod Log Writer")
                 .daemon(true)
@@ -48,15 +51,19 @@ final class FabricAuditLogger implements AutoCloseable {
     }
 
     void append(ViolationRecord record, boolean includeOriginalMessage, int retentionDays) {
-        if (!open.get()) {
-            return;
-        }
         Envelope envelope = new Envelope(
-                immutableCopy(record),
+                Objects.requireNonNull(record, "record"),
                 includeOriginalMessage,
                 Math.max(1, retentionDays),
                 false);
-        if (!queue.offer(envelope)) {
+        boolean offered;
+        synchronized (lifecycleLock) {
+            if (!accepting.get()) {
+                return;
+            }
+            offered = queue.offer(envelope);
+        }
+        if (!offered) {
             long count = dropped.incrementAndGet();
             if (count == 1 || count % 100 == 0) {
                 logger.warn("Chat AutoMod log queue is full; {} audit entries have been dropped", count);
@@ -64,22 +71,26 @@ final class FabricAuditLogger implements AutoCloseable {
         }
     }
 
+    void stopAccepting() {
+        synchronized (lifecycleLock) {
+            accepting.set(false);
+        }
+    }
+
     private void writerLoop() {
-        LocalDate lastCleanup = null;
+        LocalDate lastCleanup = LocalDate.now(ZoneOffset.UTC);
         try {
-            Files.createDirectories(logDirectory);
-            lastCleanup = LocalDate.now(ZoneOffset.UTC);
-            deleteExpiredLogsQuietly(lastCleanup, initialRetentionDays);
             while (true) {
                 Envelope envelope = queue.take();
                 if (envelope.stop()) {
                     break;
                 }
-                LocalDate date = envelope.record().timestamp().atZone(ZoneOffset.UTC).toLocalDate();
-                if (!date.equals(lastCleanup)) {
-                    deleteExpiredLogsQuietly(date, envelope.retentionDays());
-                    lastCleanup = date;
+                LocalDate currentDate = LocalDate.now(ZoneOffset.UTC);
+                if (!currentDate.equals(lastCleanup)) {
+                    deleteExpiredLogsQuietly(currentDate, envelope.retentionDays());
+                    lastCleanup = currentDate;
                 }
+                LocalDate date = envelope.record().timestamp().atZone(ZoneOffset.UTC).toLocalDate();
                 try {
                     write(envelope, date);
                 } catch (IOException exception) {
@@ -88,10 +99,10 @@ final class FabricAuditLogger implements AutoCloseable {
             }
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-        } catch (IOException exception) {
-            logger.error("Could not initialize Chat AutoMod audit logging", exception);
         } catch (RuntimeException exception) {
             logger.error("Chat AutoMod audit logging stopped unexpectedly", exception);
+        } finally {
+            accepting.set(false);
         }
     }
 
@@ -123,12 +134,18 @@ final class FabricAuditLogger implements AutoCloseable {
         JsonArray ruleIds = new JsonArray();
         record.ruleIds().forEach(rule -> ruleIds.add(sanitize(rule)));
         json.add("rule_ids", ruleIds);
+        JsonArray categories = new JsonArray();
+        record.categories().forEach(category -> categories.add(category.name()));
+        json.add("categories", categories);
+        json.addProperty("severity", record.severity().name());
         json.addProperty("decision", record.decision().name());
         json.addProperty("points_added", record.pointsAdded());
         json.addProperty("score_after", record.scoreAfter());
         JsonArray actions = new JsonArray();
         record.actions().forEach(action -> actions.add(action.name()));
         json.add("actions", actions);
+        record.muteKind().ifPresent(kind ->
+                json.addProperty("mute_kind", kind.name()));
         if (includeOriginalMessage) {
             record.originalMessage().map(FabricAuditLogger::sanitize)
                     .ifPresent(message -> json.addProperty("original_message", message));
@@ -160,20 +177,6 @@ final class FabricAuditLogger implements AutoCloseable {
         }
     }
 
-    private static ViolationRecord immutableCopy(ViolationRecord record) {
-        return new ViolationRecord(
-                record.eventId(),
-                record.timestamp(),
-                record.playerId(),
-                sanitize(record.playerName()),
-                record.ruleIds().stream().map(FabricAuditLogger::sanitize).toList(),
-                record.decision(),
-                record.pointsAdded(),
-                record.scoreAfter(),
-                record.actions(),
-                record.originalMessage().map(FabricAuditLogger::sanitize));
-    }
-
     private static String sanitize(String value) {
         if (value == null || value.isEmpty()) {
             return "";
@@ -181,6 +184,7 @@ final class FabricAuditLogger implements AutoCloseable {
         StringBuilder sanitized = new StringBuilder(value.length());
         value.codePoints()
                 .filter(codePoint -> !Character.isISOControl(codePoint)
+                        && (codePoint < 0xD800 || codePoint > 0xDFFF)
                         && codePoint != 0x2028
                         && codePoint != 0x2029)
                 .forEach(sanitized::appendCodePoint);
@@ -189,7 +193,8 @@ final class FabricAuditLogger implements AutoCloseable {
 
     @Override
     public void close() {
-        if (!open.compareAndSet(true, false)) {
+        stopAccepting();
+        if (!closed.compareAndSet(false, true)) {
             return;
         }
         try {

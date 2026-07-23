@@ -1,5 +1,7 @@
 package com.maxello1.chatautomod.fabric262;
 
+import com.maxello1.chatautomod.core.persistence.PersistenceCodec;
+import com.maxello1.chatautomod.core.persistence.PersistentSnapshot;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -24,19 +26,22 @@ final class FabricSnapshotStore implements AutoCloseable {
     private final Path stateFile;
     private final Path backupFile;
     private final Logger logger;
+    private final PersistenceCodec codec;
     private final ScheduledExecutorService writer;
     private final Object lock = new Object();
 
-    private java.util.function.Supplier<String> pendingSnapshot;
+    private PersistentSnapshot pendingSnapshot;
     private ScheduledFuture<?> scheduledSave;
     private volatile boolean primaryKnownValid;
+    private boolean purgeBackupOnNextWrite;
     private boolean closed;
 
-    FabricSnapshotStore(Path worldDataDirectory, Logger logger) {
+    FabricSnapshotStore(Path worldDataDirectory, Logger logger, PersistenceCodec codec) {
         this.directory = Objects.requireNonNull(worldDataDirectory, "worldDataDirectory");
         this.stateFile = directory.resolve("state.json");
         this.backupFile = directory.resolve("state.json.bak");
         this.logger = Objects.requireNonNull(logger, "logger");
+        this.codec = Objects.requireNonNull(codec, "codec");
         this.writer = Executors.newSingleThreadScheduledExecutor(runnable -> Thread.ofPlatform()
                 .name("Chat AutoMod State Writer")
                 .daemon(true)
@@ -72,29 +77,37 @@ final class FabricSnapshotStore implements AutoCloseable {
         }
     }
 
-    void scheduleSave(java.util.function.Supplier<String> snapshotSupplier) {
-        Objects.requireNonNull(snapshotSupplier, "snapshotSupplier");
+    void scheduleSave(PersistentSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
         synchronized (lock) {
             if (closed) {
                 return;
             }
-            pendingSnapshot = snapshotSupplier;
+            pendingSnapshot = snapshot;
             if (scheduledSave == null || scheduledSave.isDone()) {
                 scheduledSave = writer.schedule(this::drainPending, SAVE_DEBOUNCE_MILLIS, TimeUnit.MILLISECONDS);
             }
         }
     }
 
-    private void drainPending() {
-        java.util.function.Supplier<String> snapshotSupplier;
+    void purgeBackupOnNextWrite() {
         synchronized (lock) {
-            snapshotSupplier = pendingSnapshot;
+            if (!closed) {
+                purgeBackupOnNextWrite = true;
+            }
+        }
+    }
+
+    private void drainPending() {
+        PersistentSnapshot snapshot;
+        synchronized (lock) {
+            snapshot = pendingSnapshot;
             pendingSnapshot = null;
             scheduledSave = null;
         }
-        if (snapshotSupplier != null) {
+        if (snapshot != null) {
             try {
-                writeAtomically(snapshotSupplier.get());
+                writeAtomically(codec.encode(snapshot));
             } catch (IOException | RuntimeException exception) {
                 logger.error("Could not persist Chat AutoMod state", exception);
             }
@@ -107,6 +120,11 @@ final class FabricSnapshotStore implements AutoCloseable {
     }
 
     private void writeAtomically(String encodedSnapshot) throws IOException {
+        boolean purgeBackup;
+        synchronized (lock) {
+            purgeBackup = purgeBackupOnNextWrite;
+            purgeBackupOnNextWrite = false;
+        }
         Files.createDirectories(directory);
         Path temporary = directory.resolve("state.json.tmp");
         Path backupTemporary = directory.resolve("state.json.bak.tmp");
@@ -118,7 +136,10 @@ final class FabricSnapshotStore implements AutoCloseable {
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.WRITE);
 
-        if (primaryKnownValid && Files.isRegularFile(stateFile)) {
+        if (purgeBackup) {
+            Files.deleteIfExists(backupTemporary);
+            Files.deleteIfExists(backupFile);
+        } else if (primaryKnownValid && Files.isRegularFile(stateFile)) {
             Files.copy(stateFile, backupTemporary, StandardCopyOption.REPLACE_EXISTING);
             replace(backupTemporary, backupFile);
         }
@@ -134,8 +155,8 @@ final class FabricSnapshotStore implements AutoCloseable {
         }
     }
 
-    void closeWithFinalSnapshot(String encodedSnapshot) {
-        Objects.requireNonNull(encodedSnapshot, "encodedSnapshot");
+    void closeWithFinalSnapshot(PersistentSnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
         synchronized (lock) {
             if (closed) {
                 return;
@@ -150,7 +171,7 @@ final class FabricSnapshotStore implements AutoCloseable {
         try {
             writer.submit(() -> {
                 try {
-                    writeAtomically(encodedSnapshot);
+                    writeAtomically(codec.encode(snapshot));
                 } catch (IOException exception) {
                     throw new java.io.UncheckedIOException(exception);
                 }
@@ -162,15 +183,7 @@ final class FabricSnapshotStore implements AutoCloseable {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         } finally {
-            writer.shutdown();
-            try {
-                if (!writer.awaitTermination(5, TimeUnit.SECONDS)) {
-                    writer.shutdownNow();
-                }
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                writer.shutdownNow();
-            }
+            shutDownWriter();
         }
     }
 
@@ -181,11 +194,25 @@ final class FabricSnapshotStore implements AutoCloseable {
                 return;
             }
             closed = true;
+            pendingSnapshot = null;
             if (scheduledSave != null) {
                 scheduledSave.cancel(false);
+                scheduledSave = null;
             }
         }
-        writer.shutdownNow();
+        shutDownWriter();
+    }
+
+    private void shutDownWriter() {
+        writer.shutdown();
+        try {
+            if (!writer.awaitTermination(5, TimeUnit.SECONDS)) {
+                writer.shutdownNow();
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            writer.shutdownNow();
+        }
     }
 
     record StoredSnapshot(String description, String json) {}

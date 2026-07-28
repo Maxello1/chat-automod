@@ -2,6 +2,8 @@ plugins {
     id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
 }
 
+version = project.fabric_1_21_1_mod_version
+
 base {
     archivesName = "${rootProject.archives_base_name}-fabric-${project.minecraft_1_21_1_version}"
 }

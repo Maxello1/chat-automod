@@ -38,8 +38,10 @@ The 1.21.1 adapter creates the independent `config/chatautomod/discord.json` fil
 To enable it, create a Discord application and bot, invite the bot to the configured guild with permission to view and send messages in the alert channel, then:
 
 1. Set `enabled` to `true` and configure the guild, alert-channel, and authorised role or user snowflake IDs.
-2. Keep the token out of JSON. Put it in the environment variable named by `token_environment_variable` (default: `CHATAUTOMOD_DISCORD_TOKEN`).
+2. Provide the bot token either in `bot_token` for simple local testing or through the environment variable named by `token_environment_variable` (default: `CHATAUTOMOD_DISCORD_TOKEN`). The environment value takes precedence when both are set. Never commit or share a configuration containing a token.
 3. Restart the server or run `/automod reload`, then check `/automod discord status` and `/automod discord test`.
+
+Discord IDs are JSON strings, not numbers. Keep the quotation marks in entries such as `"allowed_role_ids": ["123456789012345678"]`. Newly generated files use `[""]` as an empty quoted placeholder; replace the text between the quotation marks with an ID or leave the placeholder empty while Discord is disabled.
 
 `NOTIFY_STAFF` continues to alert eligible in-game staff and also sends one Discord embed. The original message is included only when both `staff_alerts.show_original` and Discord's `include_original_message` are enabled. User-controlled text is sanitized, Discord mention parsing is disabled, and only the separately configured `mention_role_id` can be mentioned.
 

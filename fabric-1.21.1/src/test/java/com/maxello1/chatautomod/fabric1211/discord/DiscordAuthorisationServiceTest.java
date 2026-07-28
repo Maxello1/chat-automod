@@ -33,6 +33,7 @@ class DiscordAuthorisationServiceTest {
                 1,
                 true,
                 defaults.tokenEnvironmentVariable(),
+                defaults.botToken(),
                 "1",
                 "2",
                 roles,

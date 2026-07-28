@@ -26,8 +26,13 @@ class DiscordConfigLoaderTest {
         assertTrue(result.configured());
         assertFalse(result.config().enabled());
         assertEquals(Duration.ofHours(24), result.config().caseExpiry());
+        assertTrue(result.config().allowedRoleIds().isEmpty());
+        assertTrue(result.config().allowedUserIds().isEmpty());
         String written = Files.readString(path);
         assertTrue(written.contains("CHATAUTOMOD_DISCORD_TOKEN"));
+        assertTrue(written.contains("\"bot_token\": \"\""));
+        assertTrue(written.contains("\"allowed_role_ids\": [\"\"]"));
+        assertTrue(written.contains("\"allowed_user_ids\": [\"\"]"));
         assertFalse(written.contains("secret-token-value"));
     }
 
@@ -47,6 +52,32 @@ class DiscordConfigLoaderTest {
     }
 
     @Test
+    void acceptsTokenPastedIntoConfigurationWhenEnvironmentIsMissing() {
+        DiscordConfigLoader loader = new DiscordConfigLoader(name -> null);
+
+        DiscordConfigLoader.LoadResult result = loader.parse(enabledJson(
+                "\"bot_token\": \"config-token-value\", "
+                        + "\"allowed_user_ids\": [\"123456789012345680\"]"));
+
+        assertTrue(result.configured());
+        assertTrue(result.config().enabled());
+        assertEquals("config-token-value", loader.token(result.config()).orElseThrow());
+        assertFalse(result.config().toString().contains("config-token-value"));
+    }
+
+    @Test
+    void environmentTokenOverridesConfiguredToken() {
+        DiscordConfigLoader loader = new DiscordConfigLoader(name -> "environment-token-value");
+
+        DiscordConfigLoader.LoadResult result = loader.parse(enabledJson(
+                "\"bot_token\": \"config-token-value\", "
+                        + "\"allowed_user_ids\": [\"123456789012345680\"]"));
+
+        assertTrue(result.configured());
+        assertEquals("environment-token-value", loader.token(result.config()).orElseThrow());
+    }
+
+    @Test
     void missingTokenDisablesOnlyDiscordConfiguration() {
         DiscordConfigLoader loader = new DiscordConfigLoader(name -> null);
 
@@ -57,7 +88,7 @@ class DiscordConfigLoaderTest {
         assertFalse(result.configured());
         assertFalse(result.config().enabled());
         assertTrue(result.problems().stream().anyMatch(problem ->
-                problem.path().equals("$.token_environment_variable")));
+                problem.path().equals("$.bot_token")));
         assertTrue(result.problems().stream().noneMatch(problem ->
                 problem.message().contains("token-from-environment")));
     }

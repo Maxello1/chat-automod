@@ -95,7 +95,7 @@ Run the focused release checks:
 
 ## Optional Discord integration
 
-Use a non-production Discord guild and channel for these checks. Never paste the bot token into configuration, chat, commands, or logs.
+Use a non-production Discord guild and channel for these checks. A token may be supplied through `bot_token` for local testing, but never commit or share that configuration or paste the token into chat, commands, or logs.
 
 - Leave Discord disabled, start the server, and confirm no Gateway connection is attempted.
 - Enable Discord with a deliberately missing token environment variable; confirm `/automod discord status` reports failure while ordinary Minecraft moderation still works.

@@ -7,6 +7,7 @@ public record DiscordConfig(
         int schemaVersion,
         boolean enabled,
         String tokenEnvironmentVariable,
+        String botToken,
         String guildId,
         String alertChannelId,
         Set<String> allowedRoleIds,
@@ -18,6 +19,7 @@ public record DiscordConfig(
 ) {
     public DiscordConfig {
         tokenEnvironmentVariable = tokenEnvironmentVariable == null ? "" : tokenEnvironmentVariable;
+        botToken = botToken == null ? "" : botToken;
         guildId = guildId == null ? "" : guildId;
         alertChannelId = alertChannelId == null ? "" : alertChannelId;
         allowedRoleIds = Set.copyOf(allowedRoleIds);
@@ -30,6 +32,7 @@ public record DiscordConfig(
                 1,
                 false,
                 "CHATAUTOMOD_DISCORD_TOKEN",
+                "",
                 "",
                 "",
                 Set.of(),
@@ -45,6 +48,7 @@ public record DiscordConfig(
                 schemaVersion,
                 false,
                 tokenEnvironmentVariable,
+                botToken,
                 guildId,
                 alertChannelId,
                 allowedRoleIds,
@@ -53,6 +57,22 @@ public record DiscordConfig(
                 caseExpiry,
                 includeOriginalMessage,
                 actions);
+    }
+
+    @Override
+    public String toString() {
+        return "DiscordConfig[schemaVersion=" + schemaVersion
+                + ", enabled=" + enabled
+                + ", tokenEnvironmentVariable=" + tokenEnvironmentVariable
+                + ", botToken=" + (botToken.isEmpty() ? "<empty>" : "<redacted>")
+                + ", guildId=" + guildId
+                + ", alertChannelId=" + alertChannelId
+                + ", allowedRoleIds=" + allowedRoleIds
+                + ", allowedUserIds=" + allowedUserIds
+                + ", mentionRoleId=" + mentionRoleId
+                + ", caseExpiry=" + caseExpiry
+                + ", includeOriginalMessage=" + includeOriginalMessage
+                + ", actions=" + actions + "]";
     }
 
     public record Actions(

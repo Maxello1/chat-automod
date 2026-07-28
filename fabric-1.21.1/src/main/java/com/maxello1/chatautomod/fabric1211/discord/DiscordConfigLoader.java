@@ -28,10 +28,11 @@ public final class DiscordConfigLoader {
               "schema_version": 1,
               "enabled": false,
               "token_environment_variable": "CHATAUTOMOD_DISCORD_TOKEN",
+              "bot_token": "",
               "guild_id": "",
               "alert_channel_id": "",
-              "allowed_role_ids": [],
-              "allowed_user_ids": [],
+              "allowed_role_ids": [""],
+              "allowed_user_ids": [""],
               "mention_role_id": "",
               "case_expiry": "24h",
               "include_original_message": false,
@@ -96,6 +97,7 @@ public final class DiscordConfigLoader {
                 "token_environment_variable",
                 defaults.tokenEnvironmentVariable(),
                 problems);
+        String botToken = string(root, "bot_token", defaults.botToken(), problems);
         String guildId = string(root, "guild_id", defaults.guildId(), problems);
         String alertChannelId = string(root, "alert_channel_id", defaults.alertChannelId(), problems);
         Set<String> allowedRoleIds = snowflakeList(root, "allowed_role_ids", problems);
@@ -150,11 +152,11 @@ public final class DiscordConfigLoader {
                         "$.allowed_role_ids",
                         "at least one allowed role or user is required while punishment actions are enabled"));
             }
-            String tokenValue = environment.apply(tokenEnvironmentVariable);
-            if (tokenValue == null || tokenValue.isBlank()) {
+            String environmentToken = environment.apply(tokenEnvironmentVariable);
+            if ((environmentToken == null || environmentToken.isBlank()) && botToken.isBlank()) {
                 problems.add(new DiscordConfigProblem(
-                        "$.token_environment_variable",
-                        "configured token environment variable is missing or empty"));
+                        "$.bot_token",
+                        "provide bot_token or set the configured token environment variable"));
             }
         }
 
@@ -162,6 +164,7 @@ public final class DiscordConfigLoader {
                 schemaVersion,
                 enabled,
                 tokenEnvironmentVariable,
+                botToken,
                 guildId,
                 alertChannelId,
                 allowedRoleIds,
@@ -179,8 +182,13 @@ public final class DiscordConfigLoader {
     }
 
     Optional<String> token(DiscordConfig config) {
-        String value = environment.apply(config.tokenEnvironmentVariable());
-        return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
+        String environmentValue = environment.apply(config.tokenEnvironmentVariable());
+        if (environmentValue != null && !environmentValue.isBlank()) {
+            return Optional.of(environmentValue.strip());
+        }
+        return config.botToken().isBlank()
+                ? Optional.empty()
+                : Optional.of(config.botToken().strip());
     }
 
     private static JsonObject object(
@@ -284,6 +292,9 @@ public final class DiscordConfigLoader {
                 continue;
             }
             String id = entry.getAsString().strip();
+            if (id.isEmpty()) {
+                continue;
+            }
             if (!isSnowflake(id)) {
                 problems.add(new DiscordConfigProblem(path, "must be an unsigned decimal Discord ID"));
                 continue;

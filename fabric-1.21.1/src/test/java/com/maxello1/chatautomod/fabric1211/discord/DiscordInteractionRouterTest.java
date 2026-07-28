@@ -101,6 +101,7 @@ class DiscordInteractionRouterTest {
                 1,
                 true,
                 "TOKEN",
+                "",
                 "1",
                 "2",
                 Set.of("role-1"),

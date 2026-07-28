@@ -6,6 +6,14 @@ base {
     archivesName = "${rootProject.archives_base_name}-fabric-${project.minecraft_1_21_1_version}"
 }
 
+configurations {
+    discordLibraries {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+    implementation.extendsFrom(discordLibraries)
+}
+
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_1_21_1_version}"
     mappings loom.officialMojangMappings()
@@ -14,6 +22,11 @@ dependencies {
 
     implementation project(':core')
     include project(':core')
+
+    discordLibraries("net.dv8tion:JDA:${project.jda_version}") {
+        exclude module: 'opus-java'
+        exclude module: 'tink'
+    }
 
     testImplementation platform('org.junit:junit-bom:5.11.4')
     testImplementation 'org.junit.jupiter:junit-jupiter'
@@ -39,6 +52,95 @@ processResources {
     }
 }
 
+afterEvaluate {
+    configurations.discordLibraries.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+        dependencies.add('include', artifact.moduleVersion.id.toString())
+    }
+}
+
 test {
     useJUnitPlatform()
+}
+
+tasks.register('verifyDiscordRuntimeJar') {
+    group = 'verification'
+    description = 'Verifies the remapped mod jar contains JDA and its required runtime libraries.'
+    dependsOn tasks.named('remapJar')
+    doLast {
+        def modJar = tasks.named('remapJar').get().archiveFile.get().asFile
+        def requiredNestedJars = [
+                'JDA-',
+                'core-3.1.0',
+                'jackson-annotations-',
+                'jackson-core-',
+                'jackson-databind-',
+                'nv-websocket-client-',
+                'okhttp-jvm-',
+                'okio-jvm-',
+                'kotlin-stdlib-',
+                'commons-collections4-',
+                'slf4j-api-'
+        ]
+        def zip = new java.util.zip.ZipFile(modJar)
+        try {
+            def nested = zip.entries().findAll { entry ->
+                !entry.directory && entry.name.startsWith('META-INF/jars/')
+            }.collect { entry -> entry.name.substring('META-INF/jars/'.length()) }
+            def missing = requiredNestedJars.findAll { prefix ->
+                !nested.any { name -> name.startsWith(prefix) }
+            }
+            if (!missing.isEmpty()) {
+                throw new GradleException("Missing Discord runtime jars in ${modJar.name}: ${missing}")
+            }
+            def audioLibraries = nested.findAll { name ->
+                name.toLowerCase(Locale.ROOT).contains('opus')
+                        || name.toLowerCase(Locale.ROOT).startsWith('tink-')
+            }
+            if (!audioLibraries.isEmpty()) {
+                throw new GradleException("Unexpected Discord audio libraries in ${modJar.name}: ${audioLibraries}")
+            }
+
+            delete temporaryDir
+            temporaryDir.mkdirs()
+            def extracted = []
+            zip.entries().findAll { entry ->
+                !entry.directory && entry.name.startsWith('META-INF/jars/')
+            }.each { entry ->
+                def destination = new File(temporaryDir, new File(entry.name).name)
+                zip.getInputStream(entry).withCloseable { input ->
+                    destination.withOutputStream { output -> input.transferTo(output) }
+                }
+                extracted.add(destination)
+            }
+            def loader = new java.net.URLClassLoader(
+                    extracted.collect { file -> file.toURI().toURL() } as java.net.URL[],
+                    ClassLoader.getPlatformClassLoader())
+            try {
+                [
+                        'net.dv8tion.jda.api.JDABuilder',
+                        'net.dv8tion.jda.api.utils.messages.MessageCreateBuilder',
+                        'com.fasterxml.jackson.databind.ObjectMapper',
+                        'okhttp3.OkHttpClient',
+                        'okio.Buffer',
+                        'kotlin.KotlinVersion',
+                        'gnu.trove.map.hash.THashMap',
+                        'org.apache.commons.collections4.CollectionUtils',
+                        'org.slf4j.LoggerFactory'
+                ].each { className -> Class.forName(className, true, loader) }
+                def builderClass = Class.forName(
+                        'net.dv8tion.jda.api.utils.messages.MessageCreateBuilder', true, loader)
+                def builder = builderClass.getConstructor().newInstance()
+                builderClass.getMethod('setContent', String).invoke(builder, 'runtime probe')
+                builderClass.getMethod('build').invoke(builder)
+            } finally {
+                loader.close()
+            }
+        } finally {
+            zip.close()
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyDiscordRuntimeJar')
 }

@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Objects;
@@ -26,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 final class FabricAuditLogger implements AutoCloseable {
     private static final int QUEUE_CAPACITY = 2_048;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
-    private static final Envelope STOP = new Envelope(null, false, 1, true);
+    private static final Envelope STOP = new Envelope(null, null, false, 1, true);
 
     private final Path logDirectory;
     private final Logger logger;
@@ -53,9 +54,24 @@ final class FabricAuditLogger implements AutoCloseable {
     void append(ViolationRecord record, boolean includeOriginalMessage, int retentionDays) {
         Envelope envelope = new Envelope(
                 Objects.requireNonNull(record, "record"),
+                null,
                 includeOriginalMessage,
                 Math.max(1, retentionDays),
                 false);
+        offer(envelope);
+    }
+
+    void appendDiscordAction(DiscordPunishmentAuditEvent event, int retentionDays) {
+        Envelope envelope = new Envelope(
+                null,
+                Objects.requireNonNull(event, "event"),
+                false,
+                Math.max(1, retentionDays),
+                false);
+        offer(envelope);
+    }
+
+    private void offer(Envelope envelope) {
         boolean offered;
         synchronized (lifecycleLock) {
             if (!accepting.get()) {
@@ -90,7 +106,7 @@ final class FabricAuditLogger implements AutoCloseable {
                     deleteExpiredLogsQuietly(currentDate, envelope.retentionDays());
                     lastCleanup = currentDate;
                 }
-                LocalDate date = envelope.record().timestamp().atZone(ZoneOffset.UTC).toLocalDate();
+                LocalDate date = envelope.timestamp().atZone(ZoneOffset.UTC).toLocalDate();
                 try {
                     write(envelope, date);
                 } catch (IOException exception) {
@@ -116,7 +132,9 @@ final class FabricAuditLogger implements AutoCloseable {
 
     private void write(Envelope envelope, LocalDate date) throws IOException {
         Path destination = logDirectory.resolve("automod-" + date + ".jsonl");
-        String encoded = encode(envelope.record(), envelope.includeOriginalMessage());
+        String encoded = envelope.discordEvent() == null
+                ? encode(envelope.record(), envelope.includeOriginalMessage())
+                : encode(envelope.discordEvent());
         Files.writeString(
                 destination,
                 encoded + System.lineSeparator(),
@@ -150,6 +168,29 @@ final class FabricAuditLogger implements AutoCloseable {
             record.originalMessage().map(FabricAuditLogger::sanitize)
                     .ifPresent(message -> json.addProperty("original_message", message));
         }
+        return GSON.toJson(json);
+    }
+
+    private static String encode(DiscordPunishmentAuditEvent event) {
+        JsonObject json = new JsonObject();
+        json.addProperty("timestamp", event.timestamp().toString());
+        json.addProperty("event_type", "discord_moderation_action");
+        json.addProperty("case_id", sanitize(event.caseId()));
+        json.addProperty("player_uuid", event.playerId().toString());
+        json.addProperty("player_name", sanitize(event.playerName()));
+        json.addProperty("action", event.action().name());
+        if (event.duration() != null) {
+            json.addProperty("duration_seconds", event.duration().toSeconds());
+        }
+        json.addProperty("reason", sanitize(event.reason()));
+        JsonArray rules = new JsonArray();
+        event.ruleIds().forEach(rule -> rules.add(sanitize(rule)));
+        json.add("rule_ids", rules);
+        json.addProperty("moderator_source", sanitize(event.moderator().source()));
+        json.addProperty("moderator_id", sanitize(event.moderator().id()));
+        json.addProperty("moderator_display_name", sanitize(event.moderator().displayName()));
+        json.addProperty("success", event.success());
+        json.addProperty("result", sanitize(event.resultSummary()));
         return GSON.toJson(json);
     }
 
@@ -215,8 +256,13 @@ final class FabricAuditLogger implements AutoCloseable {
 
     private record Envelope(
             ViolationRecord record,
+            DiscordPunishmentAuditEvent discordEvent,
             boolean includeOriginalMessage,
             int retentionDays,
             boolean stop
-    ) {}
+    ) {
+        Instant timestamp() {
+            return discordEvent == null ? record.timestamp() : discordEvent.timestamp();
+        }
+    }
 }

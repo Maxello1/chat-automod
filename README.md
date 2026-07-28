@@ -2,7 +2,7 @@
 
 Chat AutoMod is a production-ready, server-side Fabric moderation mod for Minecraft 1.21.1. It evaluates the original signed body of public player chat, applies deterministic rules, and either allows the original message or blocks it. Messages are never reformatted or rebroadcast, and vanilla clients can join without installing the mod.
 
-The Java 21 `core` module contains the platform-independent moderation engine. The `fabric-1.21.1` adapter owns the Minecraft and Fabric integration, including lifecycle handling, commands, permissions, persistence, audit logging, and signed public-chat interception.
+The Java 21 `core` module contains the platform-independent moderation engine. The `fabric-1.21.1` adapter owns the Minecraft and Fabric integration, including lifecycle handling, commands, permissions, persistence, audit logging, signed public-chat interception, and an optional Discord staff-alert connection.
 
 ## Requirements
 
@@ -18,17 +18,32 @@ Install JDK 21, then run the focused verification commands:
 
 ```text
 ./gradlew :core:test
+./gradlew :fabric-1.21.1:test
 ./gradlew :fabric-1.21.1:build
 ./gradlew releaseBuild
 ```
 
-The distributable jar is written to `fabric-1.21.1/build/libs/chat-automod-fabric-1.21.1-<version>.jar`. It embeds the core library; a separate core jar is not required on the server.
+The distributable jar is written to `fabric-1.21.1/build/libs/chat-automod-fabric-1.21.1-<version>.jar`. It embeds the core library and the complete JDA runtime dependency graph; separate core or Discord-library jars are not required on the server. The build includes a packaged-runtime probe that loads the nested JDA libraries from the actual remapped mod jar.
 
 ## Configuration
 
 The active configuration is `config/chatautomod/automod.json`. The mod creates a complete default configuration and editable filter packs under `config/chatautomod/filters/` on first startup.
 
 Runtime JSON is strict. `/automod reload` reads the main file, every active filter pack, and the targeted exceptions file as one replacement. Errors include their source file and JSON path; no part of the replacement becomes active unless the complete set validates and compiles successfully. A commented main-configuration reference is available in [`docs/automod.example.jsonc`](docs/automod.example.jsonc).
+
+### Optional Discord staff alerts
+
+The 1.21.1 adapter creates the independent `config/chatautomod/discord.json` file. Discord is disabled by default, and an invalid Discord file never disables Minecraft moderation or invalidates `automod.json`.
+
+To enable it, create a Discord application and bot, invite the bot to the configured guild with permission to view and send messages in the alert channel, then:
+
+1. Set `enabled` to `true` and configure the guild, alert-channel, and authorised role or user snowflake IDs.
+2. Keep the token out of JSON. Put it in the environment variable named by `token_environment_variable` (default: `CHATAUTOMOD_DISCORD_TOKEN`).
+3. Restart the server or run `/automod reload`, then check `/automod discord status` and `/automod discord test`.
+
+`NOTIFY_STAFF` continues to alert eligible in-game staff and also sends one Discord embed. The original message is included only when both `staff_alerts.show_original` and Discord's `include_original_message` are enabled. User-controlled text is sanitized, Discord mention parsing is disabled, and only the separately configured `mention_role_id` can be mentioned.
+
+Authorised Discord users can apply the enabled 10-minute mute, 1-hour mute, or permanent vanilla profile-ban action, or dismiss an alert. Action cases are kept only in memory, expire after the bounded `case_expiry`, and are atomically claimed so only one click can execute. Old buttons become unavailable after a Minecraft restart. Discord callbacks enqueue Minecraft state and ban-list work on the Minecraft server thread; Discord connection or REST failures never change a chat allow/block decision.
 
 The moderation engine includes these detector families:
 
@@ -75,6 +90,8 @@ Temporary and permanent mutes block chat before normal detection and do not add 
 | `/automod` | Show runtime, configuration, rule, and tracked-player status |
 | `/automod reload` | Atomically validate and activate the configuration |
 | `/automod test <message>` | Run the active pipeline without changing state or executing actions |
+| `/automod discord status` | Show safe Discord configuration, connection, and case diagnostics |
+| `/automod discord test` | Queue a labelled test embed without creating a moderation case |
 | `/automod history <player> [page]` | Show retained moderation history |
 | `/automod violations <player> [page]` | Show active score entries, threshold state, mute state, and retained-history count |
 | `/automod clear <player> <score\|history\|spam\|all>` | Clear only the selected non-mute state |
@@ -124,15 +141,15 @@ State schema version 2 persists temporary and permanent mutes, unexpired score e
 
 State snapshots are immutable, debounced, and written away from the chat path. Writes go through a temporary file, preserve a backup, and use atomic replacement where the filesystem supports it. A damaged primary snapshot falls back to the backup, and shutdown flushes the final state and pending audit records.
 
-Logs use bounded JSON Lines output and configured retention. Original chat text is omitted from persistent state and logs unless its storage option is explicitly enabled. Control characters and line breaks are sanitized before logging.
+Logs use bounded JSON Lines output and configured retention. Discord moderation decisions have their own audit-event shape containing the case, action, matched rules, moderator identity, and success or failure without changing score or violation semantics. Original chat text is omitted from persistent state and logs unless its storage option is explicitly enabled, and Discord-action audit events never add it. Control characters and line breaks are sanitized before logging.
 
 ## Project structure
 
 - `core` contains the Java 21 configuration, normalization, detection, score, state, and persistence logic. It has no Minecraft or loader imports.
-- `fabric-1.21.1` contains the official-Mojang-mapped Minecraft 1.21.1 event, command, permission, lifecycle, action, persistence, logging, and component integration.
+- `fabric-1.21.1` contains the official-Mojang-mapped Minecraft 1.21.1 event, command, permission, lifecycle, action, persistence, logging, component, and optional JDA integration.
 
 The legacy `fabric-26.2` source remains in the repository but is not part of the 1.21.1 release build or required CI workflow.
 
-Private-message command interception, message replacement, webhooks, a client interface, arbitrary regular expressions, IPv6 advertising checks, and other loaders are outside this release.
+Discord chat relay, slash commands, account linking, appeals, persistent Discord cases, private-message command interception, message replacement, webhooks, a client interface, arbitrary regular expressions, IPv6 advertising checks, and other loaders are outside this release.
 
 See [MANUAL_TESTING.md](MANUAL_TESTING.md) for the dedicated-server smoke checklist.

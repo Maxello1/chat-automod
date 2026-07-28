@@ -11,6 +11,7 @@
     "sources": "https://github.com/Maxello1/chat-automod"
   },
   "license": "All-Rights-Reserved",
+  "icon": "assets/chatautomod/icon.png",
   "environment": "*",
   "entrypoints": {
     "main": [

@@ -30,6 +30,8 @@ import com.maxello1.chatautomod.core.state.InMemoryPlayerStateStore;
 import com.maxello1.chatautomod.core.state.MuteService;
 import com.maxello1.chatautomod.core.state.PlayerModerationState;
 import com.maxello1.chatautomod.core.state.StateClearScope;
+import com.maxello1.chatautomod.fabric1211.discord.DiscordIntegration;
+import com.maxello1.chatautomod.fabric1211.discord.DiscordIntegrationStatus;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
@@ -55,11 +57,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 final class FabricRuntime {
@@ -72,11 +76,13 @@ final class FabricRuntime {
     private final InMemoryPlayerStateStore states;
     private final ModerationService moderation;
     private final MuteService mutes;
+    private final MinecraftPunishmentService punishments;
     private final HistoryService history;
     private final PersistenceCodec persistenceCodec;
     private final FabricPermissionService permissions;
     private final FabricModerationPlatform platform;
     private final ActionPlanExecutor actionExecutor;
+    private final DiscordIntegration discordIntegration;
     private final Set<UUID> inspectors = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Instant> lastMuteNotices = new ConcurrentHashMap<>();
     private final AtomicLong evaluations = new AtomicLong();
@@ -108,14 +114,19 @@ final class FabricRuntime {
         this.states = new InMemoryPlayerStateStore();
         this.moderation = new ModerationService(configs, states);
         this.mutes = new MuteService(states, clock);
+        this.punishments = new MinecraftPunishmentService(this, mutes);
         this.history = new HistoryService(states, clock);
         this.persistenceCodec = new PersistenceCodec(2);
         this.permissions = new FabricPermissionService(logger, () -> server);
-        this.platform = new FabricModerationPlatform(this);
-        this.actionExecutor = new ActionPlanExecutor(this, platform);
         this.configDirectory = FabricLoader.getInstance().getConfigDir().resolve("chatautomod");
         this.configFile = configDirectory.resolve("automod.json");
         this.filtersDirectory = configDirectory.resolve("filters");
+        this.discordIntegration = new DiscordIntegration(
+                logger,
+                configDirectory.resolve("discord.json"),
+                this::executeDiscordPunishment);
+        this.platform = new FabricModerationPlatform(this);
+        this.actionExecutor = new ActionPlanExecutor(this, platform);
         loadInitialConfiguration();
     }
 
@@ -255,6 +266,7 @@ final class FabricRuntime {
                     config.state().maximumTrackedPlayers());
             ready = true;
             scheduleSnapshot();
+            discordIntegration.start();
             logger.info("Chat AutoMod started with {} restored player records", states.snapshots().size());
         } catch (IOException | RuntimeException exception) {
             ready = false;
@@ -292,6 +304,7 @@ final class FabricRuntime {
             return;
         }
         ready = false;
+        discordIntegration.stop();
         FabricSnapshotStore store = snapshotStore;
         FabricAuditLogger logs = auditLogger;
         if (logs != null) {
@@ -471,7 +484,7 @@ final class FabricRuntime {
         return persistenceCodec.snapshot(states.snapshots(), clock.instant(), configs.current());
     }
 
-    private void scheduleSnapshot() {
+    void scheduleSnapshot() {
         FabricSnapshotStore store = snapshotStore;
         if (store == null) {
             return;
@@ -506,7 +519,7 @@ final class FabricRuntime {
         source.sendSuccess(() -> Component.literal("Active filter rules: " + configs.current().filters().size()), false);
         source.sendSuccess(() -> Component.literal("Tracked players: " + states.snapshots().size()), false);
         source.sendSuccess(() -> Component.literal(
-                "Commands: reload, test, history, violations, clear, mute, unmute, inspect, permissions")
+                "Commands: reload, test, discord, history, violations, clear, mute, unmute, inspect, permissions")
                 .withStyle(ChatFormatting.GRAY), false);
         return 1;
     }
@@ -515,6 +528,7 @@ final class FabricRuntime {
         if (!requirePermission(source, FabricPermissionService.RELOAD)) {
             return 0;
         }
+        discordIntegration.reload();
         try {
             createMissingConfigurationFiles();
             boolean storedOriginalMessages = configs.current().logging().storeOriginalMessages();
@@ -550,6 +564,47 @@ final class FabricRuntime {
                     + FabricModerationPlatform.safeText(exception.getMessage())));
             return 0;
         }
+    }
+
+    int showDiscordStatus(CommandSourceStack source) {
+        if (!requirePermission(source, FabricPermissionService.ADMIN)) {
+            return 0;
+        }
+        DiscordIntegrationStatus status = discordIntegration.status();
+        source.sendSuccess(() -> Component.literal("Chat AutoMod Discord status")
+                .withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD), false);
+        source.sendSuccess(() -> Component.literal("Configured: " + yesNo(status.configured())), false);
+        source.sendSuccess(() -> Component.literal("Enabled: " + yesNo(status.enabled())), false);
+        source.sendSuccess(() -> Component.literal("Connection: "
+                + status.connection().name().toLowerCase(Locale.ROOT)), false);
+        source.sendSuccess(() -> Component.literal("Guild ID: "
+                + (status.guildConfigured() ? "configured" : "not configured")), false);
+        source.sendSuccess(() -> Component.literal("Channel ID: "
+                + (status.channelConfigured() ? "configured" : "not configured")), false);
+        source.sendSuccess(() -> Component.literal("Authorised roles: "
+                + status.authorisedRoleCount()), false);
+        source.sendSuccess(() -> Component.literal("Authorised users: "
+                + status.authorisedUserCount()), false);
+        source.sendSuccess(() -> Component.literal("Open cases: " + status.openCaseCount()), false);
+        if (!status.lastSafeError().isEmpty()) {
+            source.sendSuccess(() -> Component.literal("Last error: " + status.lastSafeError())
+                    .withStyle(ChatFormatting.RED), false);
+        }
+        return 1;
+    }
+
+    int testDiscordConnection(CommandSourceStack source) {
+        if (!requirePermission(source, FabricPermissionService.ADMIN)) {
+            return 0;
+        }
+        if (!discordIntegration.publishTestAlert()) {
+            source.sendFailure(Component.literal(
+                    "Discord integration is not ready. Use /automod discord status for details."));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("Discord integration test alert queued.")
+                .withStyle(ChatFormatting.GREEN), false);
+        return 1;
     }
 
     int testMessage(CommandSourceStack source, String rawMessage) {
@@ -751,49 +806,137 @@ final class FabricRuntime {
             return 0;
         }
         TargetPlayer player = target.orElseThrow();
-        UUID moderatorId = Optional.ofNullable(source.getPlayer()).map(ServerPlayer::getUUID).orElse(null);
-        String safeReason = safeReason(reason);
+        ServerPlayer moderatorPlayer = source.getPlayer();
+        ExternalModerator moderator = moderatorPlayer == null
+                ? new ExternalModerator("minecraft", "console", "Server Console")
+                : new ExternalModerator(
+                        "minecraft",
+                        moderatorPlayer.getUUID().toString(),
+                        moderatorPlayer.getGameProfile().getName());
         try {
-            var config = configs.current();
-            MuteState mute;
+            PunishmentResult result;
             if ("permanent".equalsIgnoreCase(durationText)) {
-                mute = mutes.mutePermanent(
+                result = punishments.mutePermanent(
                         player.playerId(),
                         player.playerName(),
-                        safeReason,
-                        "manual",
-                        "manual",
-                        moderatorId,
-                        config.state().maximumTrackedPlayers());
+                        reason,
+                        moderator);
             } else {
-                Duration duration = DurationParser.parse(durationText, config.mutes().maximumDuration());
-                mute = mutes.muteTemporary(
+                Duration duration = DurationParser.parse(
+                        durationText,
+                        configs.current().mutes().maximumDuration());
+                result = punishments.muteTemporary(
                         player.playerId(),
                         player.playerName(),
                         duration,
-                        config.mutes().maximumDuration(),
-                        safeReason,
-                        "manual",
-                        "manual",
-                        moderatorId,
-                        config.state().maximumTrackedPlayers());
+                        reason,
+                        moderator);
             }
-            scheduleSnapshot();
-            if (mute.kind() == MuteKind.PERMANENT) {
-                platform.notifyPlayer(player.playerId(), "You have been permanently muted. Reason: " + mute.reason());
-                source.sendSuccess(() -> Component.literal("Permanently muted " + player.playerName() + ".")
-                        .withStyle(ChatFormatting.GREEN), true);
-            } else {
-                platform.notifyPlayer(player.playerId(), "You have been muted until " + mute.mutedUntil()
-                        + ". Reason: " + mute.reason());
-                source.sendSuccess(() -> Component.literal("Muted " + player.playerName() + " until "
-                        + mute.mutedUntil() + ".").withStyle(ChatFormatting.GREEN), true);
+            if (!result.success()) {
+                source.sendFailure(Component.literal(result.safeSummary()));
+                return 0;
             }
+            source.sendSuccess(() -> Component.literal(result.safeSummary())
+                    .withStyle(ChatFormatting.GREEN), true);
             return 1;
         } catch (IllegalArgumentException exception) {
             source.sendFailure(Component.literal(FabricModerationPlatform.safeText(exception.getMessage())));
             return 0;
         }
+    }
+
+    CompletableFuture<PunishmentResult> submitToServerThread(Supplier<PunishmentResult> task) {
+        Objects.requireNonNull(task, "task");
+        MinecraftServer currentServer = server;
+        if (currentServer == null || !ready) {
+            return CompletableFuture.completedFuture(PunishmentResult.failure(
+                    "Minecraft server is stopping or unavailable.",
+                    true));
+        }
+        CompletableFuture<PunishmentResult> result = new CompletableFuture<>();
+        Runnable guarded = () -> {
+            if (server != currentServer || !ready) {
+                result.complete(PunishmentResult.failure(
+                        "Minecraft server is stopping or unavailable.",
+                        true));
+                return;
+            }
+            try {
+                result.complete(task.get());
+            } catch (RuntimeException exception) {
+                result.completeExceptionally(exception);
+            }
+        };
+        if (currentServer.isSameThread()) {
+            guarded.run();
+        } else {
+            try {
+                currentServer.execute(guarded);
+            } catch (RuntimeException exception) {
+                result.complete(PunishmentResult.failure(
+                        "Minecraft server is stopping or unavailable.",
+                        true));
+            }
+        }
+        return result;
+    }
+
+    private CompletableFuture<PunishmentResult> executeDiscordPunishment(PunishmentRequest request) {
+        CompletableFuture<PunishmentResult> submitted = submitToServerThread(() -> switch (request.action()) {
+            case MUTE_10_MINUTES, MUTE_1_HOUR -> punishments.muteTemporary(
+                    request.playerId(),
+                    request.playerName(),
+                    request.action().duration().orElseThrow(),
+                    request.reason(),
+                    request.moderator());
+            case PERMANENT_BAN -> punishments.banPermanent(
+                    request.playerId(),
+                    request.playerName(),
+                    request.reason(),
+                    request.moderator());
+            case DISMISS -> PunishmentResult.success(
+                    "Dismissed the alert for "
+                            + FabricModerationPlatform.safeText(request.playerName()) + ".");
+        });
+        return submitted.handle((result, exception) -> {
+            PunishmentResult completed = exception == null
+                    ? result
+                    : PunishmentResult.failure("The moderation action failed safely.", false);
+            if (exception != null) {
+                logger.warn("Discord moderation case {} failed ({})",
+                        request.caseId(),
+                        exception.getClass().getSimpleName());
+            }
+            appendDiscordAudit(request, completed);
+            logger.info("Discord moderation case {} action {} by user {}: {}",
+                    request.caseId(),
+                    request.action(),
+                    request.moderator().id(),
+                    completed.success() ? "success" : "failure");
+            return completed;
+        });
+    }
+
+    private void appendDiscordAudit(PunishmentRequest request, PunishmentResult result) {
+        FabricAuditLogger logs = auditLogger;
+        if (logs == null) {
+            return;
+        }
+        var logging = configs.current().logging();
+        logs.appendDiscordAction(
+                new DiscordPunishmentAuditEvent(
+                        request.caseId(),
+                        request.playerId(),
+                        request.playerName(),
+                        request.action(),
+                        request.action().duration().orElse(null),
+                        request.reason(),
+                        request.ruleIds(),
+                        request.moderator(),
+                        clock.instant(),
+                        result.success(),
+                        result.safeSummary()),
+                logging.retentionDays());
     }
 
     int unmutePlayer(CommandSourceStack source, String targetText) {
@@ -1096,7 +1239,7 @@ final class FabricRuntime {
                 .collect(java.util.stream.Collectors.joining(", ")) + ")";
     }
 
-    private static String boundedText(String value, int maximumCodePoints) {
+    static String boundedText(String value, int maximumCodePoints) {
         if (value == null || value.isEmpty()) {
             return "";
         }
@@ -1111,7 +1254,7 @@ final class FabricRuntime {
         return result.toString();
     }
 
-    private static String safeReason(String reason) {
+    static String safeReason(String reason) {
         String sanitized = boundedText(reason, 256);
         return sanitized.isBlank() ? "Muted by a staff member" : sanitized;
     }
@@ -1156,6 +1299,26 @@ final class FabricRuntime {
 
     FabricPermissionService permissions() {
         return permissions;
+    }
+
+    DiscordIntegration discordIntegration() {
+        return discordIntegration;
+    }
+
+    com.maxello1.chatautomod.core.config.CompiledAutoModConfig currentConfig() {
+        return configs.current();
+    }
+
+    FabricModerationPlatform platform() {
+        return platform;
+    }
+
+    Clock clock() {
+        return clock;
+    }
+
+    MinecraftPunishmentService punishments() {
+        return punishments;
     }
 
     int commandFallbackOperatorLevel() {

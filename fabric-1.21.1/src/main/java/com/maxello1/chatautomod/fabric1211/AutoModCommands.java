@@ -27,9 +27,15 @@ final class AutoModCommands {
                         .then(Commands.literal("test")
                                 .requires(source -> runtime.mayUse(source, FabricPermissionService.TEST))
                                 .then(Commands.argument("message", StringArgumentType.greedyString())
-                                        .executes(context -> runtime.testMessage(
-                                                context.getSource(),
-                                                StringArgumentType.getString(context, "message")))))
+                                                .executes(context -> runtime.testMessage(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(context, "message")))))
+                        .then(Commands.literal("discord")
+                                .requires(source -> runtime.mayUse(source, FabricPermissionService.ADMIN))
+                                .then(Commands.literal("status")
+                                        .executes(context -> runtime.showDiscordStatus(context.getSource())))
+                                .then(Commands.literal("test")
+                                        .executes(context -> runtime.testDiscordConnection(context.getSource()))))
                         .then(pagedPlayerCommand("history", false))
                         .then(pagedPlayerCommand("violations", true))
                         .then(clearCommand())

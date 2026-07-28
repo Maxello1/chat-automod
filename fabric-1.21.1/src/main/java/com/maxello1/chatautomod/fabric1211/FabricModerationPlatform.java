@@ -100,6 +100,7 @@ final class FabricModerationPlatform implements MinecraftPlatformAdapter {
                 }
             }
         });
+        runtime.discordIntegration().publishAlert(alert);
     }
 
     private Component staffAlert(ModerationAction.NotifyStaff alert, boolean inspectEnabled) {

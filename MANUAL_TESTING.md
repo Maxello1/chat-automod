@@ -8,6 +8,7 @@ Run the focused release checks:
 
 ```text
 ./gradlew :core:test
+./gradlew :fabric-1.21.1:test
 ./gradlew :fabric-1.21.1:build
 ```
 
@@ -20,6 +21,7 @@ Run the focused release checks:
 - Start Minecraft 1.21.1 with Fabric Loader, Fabric API, Chat AutoMod, and Java 21.
 - Confirm the log lists Chat AutoMod without entrypoint, linkage, or mixin failures.
 - Confirm startup creates `config/chatautomod/automod.json`.
+- Confirm startup creates disabled `config/chatautomod/discord.json` without a token value.
 - Confirm startup creates all default files under `config/chatautomod/filters/`, including `exceptions.json`.
 - Confirm startup creates the world `chatautomod` data directory and can write its state and log directories.
 - Join with an unmodified client that does not have Chat AutoMod installed.
@@ -90,3 +92,28 @@ Run the focused release checks:
 - Enable original-message logging deliberately and confirm sanitized single-line output.
 - Place an expired daily log in the logs directory, restart, and confirm retention cleanup removes it.
 - Stop the server after queued violations and confirm the final snapshot and pending log records are flushed without executor-shutdown errors.
+
+## Optional Discord integration
+
+Use a non-production Discord guild and channel for these checks. Never paste the bot token into configuration, chat, commands, or logs.
+
+- Leave Discord disabled, start the server, and confirm no Gateway connection is attempted.
+- Enable Discord with a deliberately missing token environment variable; confirm `/automod discord status` reports failure while ordinary Minecraft moderation still works.
+- Supply the token through the configured environment variable, restart or reload, and confirm status becomes `ready` without requesting the privileged Message Content intent.
+- Run `/automod discord test`; confirm one clearly labelled test embed appears with no functional punishment buttons or moderation case.
+- Trigger a harmless `NOTIFY_STAFF` rule; confirm eligible in-game staff still receive the existing alert and Discord receives exactly one embed.
+- Disable either `staff_alerts.show_original` or Discord `include_original_message`; in both cases confirm Discord receives no original text.
+- Enable both privacy settings only in the disposable environment. Send text containing `@everyone`, `@here`, `<@user>`, `<@&role>`, Markdown, line breaks, and control characters; confirm no user-generated mention fires and the embed remains readable.
+- Configure an explicit `mention_role_id`; confirm only that role can be mentioned by the alert content.
+- As an unauthorised Discord user, click every button; confirm the response is ephemeral and no Minecraft state or hidden case detail is revealed.
+- As a user authorised directly by ID, apply `Mute 10m`; confirm the interaction is acknowledged promptly, the player is muted, the alert buttons are disabled, the moderator is shown, and the mute survives a restart.
+- Repeat role-based authorisation with `Mute 1h`, including an offline known player, and confirm the persisted UUID mute is applied.
+- Apply `Ban` to an online player and an offline player in separate cases; confirm the online player disconnects, both profiles remain in the vanilla user ban list after restart, and the audit reason names the Discord moderator and matched rules.
+- Click `Dismiss`; confirm buttons are disabled, the moderator is recorded, and no Minecraft punishment occurs.
+- Have two authorised users click different actions on one open alert at nearly the same time; confirm exactly one action executes and the other receives an already-handled response.
+- Disable one configured action after an alert is created and reload; confirm the old button is rejected without claiming the case.
+- Restart Minecraft, then click an old button; confirm the bot reports that the case expired or the server restarted.
+- Disconnect or rate-limit Discord while triggering alerts; confirm Minecraft chat moderation does not pause and in-game alerts continue.
+- Stop Minecraft while an acknowledged interaction is pending; confirm it fails safely and no JDA or callback threads keep the process alive.
+- Inspect `logs/automod-YYYY-MM-DD.jsonl`; confirm every Discord resolution records its case, action, player, matched rules, moderator ID/display name, timestamp, and result without a token or original message.
+- Inspect the release jar under `META-INF/jars/`; confirm JDA, Jackson, OkHttp/Okio, Kotlin, websocket, collections, and supporting runtime jars are present, with no voice/audio dependency.
